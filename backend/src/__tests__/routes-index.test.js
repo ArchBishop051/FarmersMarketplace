@@ -73,6 +73,18 @@ describe('routes/index.js — dual path registration via registerRoute', () => {
   });
 });
 
+describe('Helmet security headers', () => {
+  it('preserves configured Stellar hosts in the content security policy', async () => {
+    const res = await request(app).get('/api/v1/health');
+    const csp = res.headers['content-security-policy'];
+
+    expect(csp).toContain('https://stellar.expert');
+    expect(csp).toContain('https://horizon-testnet.stellar.org');
+    expect(csp).toContain('https://horizon.stellar.org');
+    expect(csp).not.toContain("connect-src 'self';");
+  });
+});
+
 // ── SEO / non-versioned endpoints ────────────────────────────────────────
 describe('routes/index.js — SEO endpoints', () => {
   it('GET /robots.txt returns text/plain', async () => {
