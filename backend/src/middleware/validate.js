@@ -91,6 +91,13 @@ module.exports = {
     min_order_quantity: z.coerce.number().int().positive('min_order_quantity must be a positive integer').optional(),
     pricing_model: z.enum(['fixed', 'pwyw', 'donation']).default('fixed'),
     min_price: z.coerce.number().nonnegative('min_price must be non-negative').optional(),
+    weight_kg: z.coerce.number().positive('weight_kg must be a positive number').optional(),
+    is_preorder: z.union([z.boolean(), z.literal(0), z.literal(1), z.enum(['0', '1'])]).optional(),
+    preorder_delivery_date: z.string().nullable().optional(),
+    allergens: z.array(z.string()).optional(),
+    allowed_regions: z.array(z.string()).optional(),
+    available_from: z.string().nullable().optional(),
+    available_until: z.string().nullable().optional(),
   }).refine(d => {
     if (d.pricing_type === 'weight') {
       if (!d.min_weight || !d.max_weight) return false;

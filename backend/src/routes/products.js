@@ -220,7 +220,10 @@ router.get('/:id', (req, res) => {
 router.post('/', auth, requireEmailVerified, validate.product, async (req, res) => {
   if (req.user.role !== 'farmer') return err(res, 403, 'Only farmers can list products', 'forbidden');
 
-  const { name, description, unit, category, image_url, nutrition } = req.body;
+  const {
+    name, description, unit, category, image_url, nutrition, pricing_type, min_weight,
+    max_weight, min_order_quantity, pricing_model, min_price, low_stock_threshold,
+  } = req.body;
   const price = parseFloat(req.body.price);
   const quantity = parseInt(req.body.quantity, 10);
 
@@ -234,26 +237,43 @@ router.post('/', auth, requireEmailVerified, validate.product, async (req, res) 
   const { weight_kg, available_from, available_until } = req.body;
 
   if (available_until != null) {
-    if (new Date(available_until) <= new Date()) return err(res, 400, 'available_until must be in the future', 'validation_error');
+    const until = new Date(available_until);
+    if (Number.isNaN(until.getTime()) || until <= new Date())
+      return err(res, 400, 'available_until must be in the future', 'validation_error');
+  }
+  if (available_from != null && Number.isNaN(new Date(available_from).getTime())) {
+    return err(res, 400, 'available_from must be a valid date', 'validation_error');
   }
   if (available_from != null && available_until != null) {
-    if (new Date(available_from) >= new Date(available_until)) return err(res, 400, 'available_from must be before available_until', 'validation_error');
+    if (new Date(available_from) >= new Date(available_until))
+      return err(res, 400, 'available_from must be before available_until', 'validation_error');
   }
 
-  const result = db.prepare(
-    'INSERT INTO products (farmer_id, name, description, price, quantity, unit, weight_kg) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(
-    req.user.id, name, description || '', price, quantity,
-    unit || 'unit', weight_kg != null ? weight_kg : 1.0
+  const allergenResult = parseAndValidateAllergens(req.body.allergens);
+  if (allergenResult.error) return err(res, 400, allergenResult.error, 'invalid_allergen');
+  const allowedRegions = parseAllowedRegions(req.body.allowed_regions);
+
+  const columns = [
+    'farmer_id', 'name', 'description', 'category', 'price', 'quantity', 'unit', 'weight_kg',
+    'image_url', 'nutrition', 'available_from', 'available_until', 'is_preorder',
+    'preorder_delivery_date', 'allergens', 'allowed_regions', 'pricing_type', 'min_weight',
+    'max_weight', 'min_order_quantity', 'pricing_model', 'min_price', 'low_stock_threshold',
+  ];
+  const values = [
+    req.user.id, name, description || '', category || 'other', price, quantity, unit || 'unit',
+    weight_kg ?? 1.0, image_url || null, nutrition ? JSON.stringify(nutrition) : null,
+    available_from || null, available_until || null, preorder.isPreorder,
+    preorder.isPreorder ? preorder.preorderDeliveryDate : null, allergenResult.allergens,
+    allowedRegions, pricing_type || 'unit', min_weight ?? null, max_weight ?? null,
+    min_order_quantity ?? 1, pricing_model || 'fixed', min_price ?? null,
+    low_stock_threshold ?? 5,
+  ];
+  const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+  const { rows } = await db.query(
+    `INSERT INTO products (${columns.join(', ')}) VALUES (${placeholders}) RETURNING id`,
+    values
   );
-
-  const productId = result.lastInsertRowid;
-
-  if (available_from) {
-    db.prepare('INSERT INTO product_scheduling (product_id, available_from) VALUES (?, ?)').run(
-      productId, available_from
-    );
-  }
+  const productId = rows[0].id;
 
   await cache.delByPattern('products:*');
   res.json({ id: productId, message: 'Product listed' });
