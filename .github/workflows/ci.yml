@@ -143,6 +143,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check EscrowError codes (NEXT_CODE, no reuse, README table)
+        run: bash scripts/check-escrow-error-codes.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

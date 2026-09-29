@@ -112,6 +112,13 @@ pub fn compute_surplus(stream: &PaymentStream, now: u64, new_rate: i128) -> i128
 /// - Any surplus deposit (tokens that can no longer be consumed at the lower
 ///   rate before `end_time`) is refunded to the sender.
 ///
+/// # Zero rate (#1241)
+/// Decreasing to `0` is intentionally rejected: stopping a stream is done
+/// with `cancel_stream`, which freezes accrual and refunds the unaccrued
+/// remainder in one step. A stream whose `rate_per_second` is 0 would accrue
+/// nothing past its last checkpoint, and `withdraw` / `cancel_stream` would
+/// still settle whatever accrued before that checkpoint.
+///
 /// # Panics
 /// - If the stream does not exist.
 /// - If `new_rate` is 0 or ≥ the current rate.
@@ -1058,5 +1065,96 @@ mod tests {
 
         // Rate must not change.
         assert_eq!(stream.rate_per_second, original_rate);
+    }
+
+    // ── zero-rate boundary (issue #1241) ──────────────────────────────────────
+
+    #[soroban_sdk::contract]
+    pub struct ZeroRateNoopToken;
+
+    #[soroban_sdk::contractimpl]
+    impl ZeroRateNoopToken {
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
+    }
+
+    fn store_active_stream(env: &Env, id: u64, sender: &Address, recipient: &Address) {
+        let stream = PaymentStream {
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            rate_per_second: 10,
+            deposit: 1000,
+            accrued_at_checkpoint: 0,
+            last_checkpoint_at: 0,
+            end_time: 100,
+            cancelled: false,
+            withdrawn_amount: 0,
+        };
+        env.storage().persistent().set(&StreamKey::Stream(id), &stream);
+    }
+
+    #[test]
+    #[should_panic(expected = "new_rate must be greater than zero")]
+    fn decrease_rate_to_zero_is_rejected() {
+        use soroban_sdk::testutils::Ledger as _;
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::EscrowContract, ());
+        env.ledger().set_timestamp(30);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            store_active_stream(&env, 1241, &sender, &recipient);
+            decrease_rate_per_second(&env, 1241, &sender, 0);
+        });
+    }
+
+    #[test]
+    fn zero_rate_stream_stops_accruing_at_checkpoint() {
+        let env = Env::default();
+        // Rate 10 from t=0, checkpointed at t=30 (accrued 300), then zeroed.
+        let mut stream = checkpoint(make_stream(&env, 10, 1000, 0, 100), 30);
+        stream.rate_per_second = 0;
+        assert_eq!(stream.accrued_at_checkpoint, 300);
+
+        // Advancing the clock — including past end_time — accrues nothing more.
+        assert_eq!(get_accrued_amount(&stream, 31), 300);
+        assert_eq!(get_accrued_amount(&stream, 80), 300);
+        assert_eq!(get_accrued_amount(&stream, 500), 300);
+    }
+
+    #[test]
+    fn zero_rate_stream_can_still_withdraw_and_cancel() {
+        use soroban_sdk::testutils::Ledger as _;
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(crate::EscrowContract, ());
+        let token = env.register(ZeroRateNoopToken, ());
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut stream = checkpoint(make_stream(&env, 10, 1000, 0, 100), 30);
+            stream.sender = sender.clone();
+            stream.recipient = recipient.clone();
+            stream.rate_per_second = 0;
+            env.storage().persistent().set(&StreamKey::Stream(1241), &stream);
+        });
+
+        env.ledger().set_timestamp(80);
+        env.as_contract(&contract_id, || {
+            // Only what accrued before the rate was zeroed is withdrawable.
+            assert_eq!(withdraw(&env, 1241, &token, &recipient), 300);
+            assert_eq!(withdraw(&env, 1241, &token, &recipient), 0);
+
+            // Cancelling refunds the full unaccrued remainder to the sender.
+            assert_eq!(cancel_stream(&env, 1241, &token), 700);
+            let s: PaymentStream = env
+                .storage()
+                .persistent()
+                .get(&StreamKey::Stream(1241))
+                .unwrap();
+            assert!(s.cancelled);
+            assert_eq!(s.withdrawn_amount, 300);
+        });
     }
 }
