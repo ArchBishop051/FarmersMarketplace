@@ -511,3 +511,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1312 -->
 - #1312: Legacy `contract/` escrow never moves tokens: deposit/release/refund are bookkeeping only
+
+<!-- handsoff-issue-1313 -->
+- #1313: Legacy `grant_role` lets anyone claim `Platform` before `initialize`, and `revoke_role` can lock out all admins
