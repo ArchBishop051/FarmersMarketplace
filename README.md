@@ -514,3 +514,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1303 -->
 - #1303: `set_admin` is a single-step admin replacement that bypasses the two-step transfer
+
+<!-- handsoff-issue-1304 -->
+- #1304: Separate the "platform operator" role from the "fee destination" address (`init` vs `initialize`)
