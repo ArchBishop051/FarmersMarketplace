@@ -75,7 +75,14 @@ async function rollback() {
 
   const last = [...applied].sort().at(-1);
   const undoName = last.replace(/\.sql$/, '.undo.sql');
-  const undoPath = path.join(MIGRATIONS_DIR, undoName);
+  const dialect = db.isPostgres ? 'postgres' : 'sqlite';
+  const dialectUndoPath = path.join(
+    MIGRATIONS_DIR,
+    `${last.slice(0, -4)}.undo.${dialect}`
+  );
+  const undoPath = fs.existsSync(dialectUndoPath)
+    ? dialectUndoPath
+    : path.join(MIGRATIONS_DIR, undoName);
 
   if (!fs.existsSync(undoPath)) {
     console.error(`[migrate] No rollback file found: ${undoName}`);

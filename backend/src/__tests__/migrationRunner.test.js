@@ -39,4 +39,18 @@ describe('migration runner failure recovery', () => {
       '001_first.sql', '002_broken.sql', '003_last.sql',
     ]);
   });
+
+  it('uses a SQLite-specific migration when one is present', async () => {
+    fs.writeFileSync(path.join(dir, '004_dialect.sql'), 'CREATE TABLE wrong_dialect (id INTEGER);');
+    fs.writeFileSync(path.join(dir, '004_dialect.sqlite'), 'CREATE TABLE sqlite_dialect (id INTEGER);');
+
+    await runMigrations(db, dir);
+
+    expect(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_dialect'"
+    ).get()).toEqual({ name: 'sqlite_dialect' });
+    expect(sqlite.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'wrong_dialect'"
+    ).get()).toBeUndefined();
+  });
 });

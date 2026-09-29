@@ -42,7 +42,7 @@ const {
   releaseIdempotencyKey,
   cacheResponse,
 } = require('../utils/idempotency');
-const { getTierPrice } = require('./coupons');
+const { getTierPrice, reserveCoupon, releaseCoupon } = require('./coupons');
 const { checkGeoFence, checkCoordinateGeoFence } = require('../utils/geocheck');
 const { broadcastStockUpdate } = require('./products');
 const { couponNowExpression } = require('../utils/couponTime');
@@ -194,9 +194,19 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
   }
 
   const totalPrice = parseFloat((bundle.price - discount).toFixed(7));
+  if (totalPrice <= 0)
+    return err(res, 422, 'Coupon discount must leave a positive order total', 'zero_order_total');
+
   const balance = await getBalance(buyer.stellar_public_key);
   if (balance < totalPrice + 0.00001) {
     return res.status(402).json({ success: false, message: 'Insufficient XLM balance', code: 'insufficient_balance' });
+  }
+
+  let couponUseId = null;
+  if (appliedCoupon) {
+    couponUseId = await reserveCoupon(appliedCoupon.id, req.user.id);
+    if (couponUseId == null)
+      return err(res, 409, 'Coupon usage limit reached', 'coupon_exhausted');
   }
 
   let orderIds = [];
@@ -220,6 +230,7 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
     }
     if (outOfStock.length > 0) {
       await db.query('ROLLBACK');
+      if (couponUseId != null) await releaseCoupon(appliedCoupon.id, req.user.id, couponUseId);
       return res.status(409).json({ success: false, code: 'insufficient_stock', outOfStock });
     }
 
@@ -238,9 +249,11 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
     await db.query('COMMIT');
   } catch (e) {
     await db.query('ROLLBACK');
+    if (couponUseId != null) await releaseCoupon(appliedCoupon.id, req.user.id, couponUseId);
     return err(res, 400, e.message || 'Failed to process bundle order', 'bundle_order_failed');
   }
 
+  let paymentSubmitted = false;
   try {
     const txHash = await sendPayment({
       senderSecret: await decryptUserSecretKey(buyer.stellar_secret_key),
@@ -248,12 +261,9 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
       amount: totalPrice,
       memo: `Bundle#${bundle_id}`,
     });
+    paymentSubmitted = true;
     for (const orderId of orderIds) {
       await db.query('UPDATE orders SET status = $1, stellar_tx_hash = $2 WHERE id = $3', ['paid', txHash, orderId]);
-    }
-    if (appliedCoupon) {
-      await db.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [appliedCoupon.id]);
-      await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
     const savings = parseFloat((individualTotal - totalPrice).toFixed(7));
     const responseData = {
@@ -278,6 +288,8 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
 
     return res.json(responseData);
   } catch (e) {
+    if (couponUseId != null && !paymentSubmitted)
+      await releaseCoupon(appliedCoupon.id, req.user.id, couponUseId);
     await db.query('BEGIN');
     for (const orderId of orderIds) {
       await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
@@ -468,6 +480,8 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   }
 
   const totalPrice = parseFloat((subtotal - discount - bundleDiscount).toFixed(7));
+  if (totalPrice <= 0)
+    return err(res, 422, 'Coupon discount must leave a positive order total', 'zero_order_total');
 
   const usePathPayment = !!(_sourceAssetCode && _sourceAssetCode !== 'XLM');
 
@@ -507,18 +521,24 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   );
   const orderId = orderRows[0].id;
 
+  let couponUseId = null;
+  if (appliedCoupon && req.body.payment_method !== 'sep7') {
+    couponUseId = await reserveCoupon(appliedCoupon.id, req.user.id);
+    if (couponUseId == null) {
+      await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
+      return err(res, 409, 'Coupon usage limit reached', 'coupon_exhausted');
+    }
+  }
+
   // SEP-0007 wallet flow — return payment link without processing
   if (req.body.payment_method === 'sep7') {
-    if (appliedCoupon) {
-      await db.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [appliedCoupon.id]);
-      await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
-    }
     const responseData = { success: true, orderId, status: 'pending', totalPrice, message: 'Order created for SEP-0007 payment' };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 }, undefined, req.user.id);
     return res.json(responseData);
   }
 
   // Payment processing
+  let paymentSubmitted = false;
   try {
     let txHash;
     let balanceId = null;
@@ -564,6 +584,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
           : 0,
       });
       txHash = result.txHash;
+      paymentSubmitted = true;
       balanceId = `soroban:${orderId}`;
       await db.query(
         'UPDATE orders SET status = $1, stellar_tx_hash = $2, escrow_balance_id = $3, escrow_status = $4 WHERE id = $5',
@@ -579,6 +600,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
         unlockAtUnix,
       });
       txHash = hold.txHash;
+      paymentSubmitted = true;
       balanceId = hold.balanceId;
       await db.query(
         'UPDATE orders SET status = $1, stellar_tx_hash = $2, escrow_balance_id = $3, escrow_status = $4 WHERE id = $5',
@@ -594,6 +616,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
         destAmount: totalPrice,
         memo: `Order#${orderId}`,
       });
+      paymentSubmitted = true;
       await db.query('UPDATE orders SET status = $1, stellar_tx_hash = $2 WHERE id = $3', ['paid', txHash, orderId]);
     } else {
       txHash = await sendPayment({
@@ -602,6 +625,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
         amount: totalPrice,
         memo: `Order#${orderId}`,
       });
+      paymentSubmitted = true;
       await db.query('UPDATE orders SET status = $1, stellar_tx_hash = $2 WHERE id = $3', ['paid', txHash, orderId]);
     }
 
@@ -623,11 +647,6 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
           logger.error('[Referral] Failed to send bonus:', { error: bonusErr.message });
         }
       }
-    }
-
-    if (appliedCoupon) {
-      await db.query('UPDATE coupons SET used_count = used_count + 1 WHERE id = $1', [appliedCoupon.id]);
-      await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
 
     sendOrderEmails({ order: { id: orderId, quantity, total_price: totalPrice, stellar_tx_hash: txHash }, product, buyer, farmer })
@@ -680,6 +699,8 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 201 }, undefined, req.user.id);
     return res.status(201).json(responseData);
   } catch (e) {
+    if (couponUseId != null && !paymentSubmitted)
+      await releaseCoupon(appliedCoupon.id, req.user.id, couponUseId);
     if (usePathPayment) {
       // Path payment orders must not be persisted on failure — delete the pending row
       await db.query('DELETE FROM orders WHERE id = $1', [orderId]);
