@@ -506,3 +506,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for full guidance on:
 - Issue workflow and label guide
 
 For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md) instead of opening a public issue.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1302 -->
+- #1302: `set_auto_release_days` has no bounds, so an admin can set `0` and allow instant permissionless release
