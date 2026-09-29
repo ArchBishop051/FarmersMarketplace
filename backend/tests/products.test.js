@@ -53,6 +53,18 @@ describe('GET /api/products', () => {
     expect(res.body.page).toBe(1);
   });
 
+  it('groups the best-before condition so it cannot bypass other filters', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ count: '0' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    await request(app).get('/api/products?category=vegetables&minPrice=1');
+
+    expect(mockQuery.mock.calls[0][0]).toContain(
+      'p.quantity > 0 AND (p.best_before IS NULL OR p.best_before >= CURRENT_DATE) AND'
+    );
+    expect(mockQuery.mock.calls[0][1]).toEqual(['vegetables', 1]);
+  });
+
   describe('filters', () => {
     it('filters by grade=A only', async () => {
       mockGet.mockReturnValueOnce({ count: 2 }); // total count

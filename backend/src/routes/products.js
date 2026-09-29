@@ -67,7 +67,7 @@ router.get('/', async (req, res) => {
     : '';
 
   if (available === 'true') conditions.push('p.quantity > 0');
-  conditions.push(`p.best_before IS NULL OR p.best_before >= CURRENT_DATE`);
+  conditions.push(`(p.best_before IS NULL OR p.best_before >= CURRENT_DATE)`);
   const now = db.isPostgres ? 'NOW()' : "datetime('now')";
   conditions.push(`(p.available_from IS NULL OR p.available_from <= ${now})`);
   conditions.push(`(p.available_until IS NULL OR p.available_until >= ${now})`);
