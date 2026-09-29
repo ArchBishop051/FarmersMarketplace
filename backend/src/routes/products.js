@@ -130,7 +130,7 @@ router.get('/', async (req, res) => {
             COUNT(r.id) as review_count${popularSelect}${tsRankSelect}
      FROM products p
      JOIN users u ON p.farmer_id = u.id
-     LEFT JOIN reviews r ON r.product_id = p.id
+     LEFT JOIN reviews r ON r.product_id = p.id AND r.status = 'approved'
      ${categoryJoin}
      ${popularJoin}
      ${where}
