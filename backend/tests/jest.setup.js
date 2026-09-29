@@ -80,6 +80,8 @@ jest.mock('../src/utils/pushNotifications', () => ({ sendPushToUser: jest.fn().m
 jest.mock('../src/utils/geocheck', () => ({ checkGeoFence: jest.fn().mockResolvedValue({ allowed: true }) }));
 jest.mock('../src/utils/idempotency', () => ({
   getCachedResponse: jest.fn().mockReturnValue(null),
+  claimIdempotencyKey: jest.fn().mockResolvedValue({ status: 'claimed' }),
+  releaseIdempotencyKey: jest.fn().mockResolvedValue(undefined),
   cacheResponse: jest.fn(),
 }));
 jest.mock('../src/services/AutomaticOrderProcessor', () =>

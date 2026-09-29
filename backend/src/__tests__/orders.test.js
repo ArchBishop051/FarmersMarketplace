@@ -627,11 +627,14 @@ describe('POST /api/orders — idempotency (#802)', () => {
 
   it('replays a cached 201 response with correct status', async () => {
     const idempotency = require('../utils/idempotency');
-    jest.spyOn(idempotency, 'getCachedResponse').mockResolvedValueOnce({
-      success: true,
-      orderId: 42,
-      status: 'paid',
-      _status: 201,
+    jest.spyOn(idempotency, 'claimIdempotencyKey').mockResolvedValueOnce({
+      status: 'cached',
+      response: {
+        success: true,
+        orderId: 42,
+        status: 'paid',
+        _status: 201,
+      },
     });
 
     const res = await request(app)
@@ -644,9 +647,9 @@ describe('POST /api/orders — idempotency (#802)', () => {
     expect(res.body.orderId).toBe(42);
   });
 
-  it('returns 503 when getCachedResponse throws', async () => {
+  it('returns 503 when claiming an idempotency key throws', async () => {
     const idempotency = require('../utils/idempotency');
-    jest.spyOn(idempotency, 'getCachedResponse').mockRejectedValueOnce(new Error('Redis down'));
+    jest.spyOn(idempotency, 'claimIdempotencyKey').mockRejectedValueOnce(new Error('Database unavailable'));
 
     const res = await request(app)
       .post('/api/orders')

@@ -37,7 +37,11 @@ const {
 } = require('../utils/mailer');
 const { sendPushToUser } = require('../utils/pushNotifications');
 const { err } = require('../middleware/error');
-const { getCachedResponse, cacheResponse } = require('../utils/idempotency');
+const {
+  claimIdempotencyKey,
+  releaseIdempotencyKey,
+  cacheResponse,
+} = require('../utils/idempotency');
 const { getTierPrice } = require('./coupons');
 const { checkGeoFence, checkCoordinateGeoFence } = require('../utils/geocheck');
 const { broadcastStockUpdate } = require('./products');
@@ -265,7 +269,7 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
       discount: discount > 0 ? discount : undefined,
       coupon: appliedCoupon ? { code: appliedCoupon.code, discount_type: appliedCoupon.discount_type } : undefined,
     };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 }, undefined, req.user.id);
 
     // Send bundle receipt email (non-fatal)
     const { sendBundleReceiptEmail } = require('../utils/mailer');
@@ -283,7 +287,7 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
     }
     await db.query('COMMIT');
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderIds };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 }, undefined, req.user.id);
     return res.status(402).json(errorData);
   }
 }
@@ -314,8 +318,19 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
   }
 
   try {
-    const cached = await getCachedResponse(idempotencyKey);
-    if (cached) return res.status(cached._status || (cached.success ? 201 : 402)).json(cached);
+    const claim = await claimIdempotencyKey(req.user.id, idempotencyKey);
+    if (claim.status === 'cached') {
+      const cached = claim.response;
+      return res.status(cached._status || (cached.success ? 201 : 402)).json(cached);
+    }
+    if (claim.status === 'in_progress') {
+      return err(res, 409, 'An order with this idempotency key is still processing', 'idempotency_in_progress');
+    }
+    res.once('finish', () => {
+      releaseIdempotencyKey(idempotencyKey, req.user.id).catch((error) => {
+        logger.error('[orders] Failed to release pending idempotency key', { error: error.message });
+      });
+    });
   } catch (e) {
     logger.error('[orders] idempotency cache error', { error: e.message });
     return res.status(503).json({ success: false, error: 'Service temporarily unavailable', code: 'idempotency_unavailable' });
@@ -499,7 +514,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
       await db.query('INSERT INTO coupon_uses (coupon_id, user_id) VALUES ($1, $2)', [appliedCoupon.id, req.user.id]);
     }
     const responseData = { success: true, orderId, status: 'pending', totalPrice, message: 'Order created for SEP-0007 payment' };
-    if (idempotencyKey) cacheResponse(idempotencyKey, { ...responseData, _status: 200 });
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 200 }, undefined, req.user.id);
     return res.json(responseData);
   }
 
@@ -662,7 +677,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
       claimableBalanceId: balanceId,
       sourceAsset: usePathPayment ? _sourceAssetCode : 'XLM',
     };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 201 });
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...responseData, _status: 201 }, undefined, req.user.id);
     return res.status(201).json(responseData);
   } catch (e) {
     if (usePathPayment) {
@@ -678,7 +693,7 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
     }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
-    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
+    if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 }, undefined, req.user.id);
     return res.status(402).json(errorData);
   }
 });
