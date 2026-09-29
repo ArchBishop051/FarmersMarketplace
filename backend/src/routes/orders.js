@@ -673,8 +673,9 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -795,13 +796,29 @@ router.patch('/:id/status', auth, validate.updateOrderStatus, async (req, res) =
   const order = rows[0];
   if (!order) return err(res, 404, 'Order not found or not yours', 'not_found');
 
+  const allowedNextStatuses = {
+    paid: ['processing'],
+    processing: ['shipped'],
+    shipped: ['delivered'],
+  };
+  if (!allowedNextStatuses[order.status]?.includes(status)) {
+    return err(res, 409, `Cannot change order status from ${order.status} to ${status}`, 'invalid_status_transition');
+  }
+
+  let updateResult;
   if (status === 'delivered') {
-    await db.query(
-      'UPDATE orders SET status = $1, delivered_at = $2 WHERE id = $3',
-      [status, new Date().toISOString(), order.id]
+    updateResult = await db.query(
+      'UPDATE orders SET status = $1, delivered_at = $2 WHERE id = $3 AND status = $4',
+      [status, new Date().toISOString(), order.id, order.status]
     );
   } else {
-    await db.query('UPDATE orders SET status = $1 WHERE id = $2', [status, order.id]);
+    updateResult = await db.query(
+      'UPDATE orders SET status = $1 WHERE id = $2 AND status = $3',
+      [status, order.id, order.status]
+    );
+  }
+  if (updateResult.rowCount === 0) {
+    return err(res, 409, 'Order status changed before the update could be applied', 'invalid_status_transition');
   }
 
   if (status === 'completed' && order.buyer_stellar_address) {
