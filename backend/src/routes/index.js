@@ -2,7 +2,7 @@ const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const logger = require('../logger');
 const db = require('../db/schema');
-const { Server } = require('@stellar/stellar-sdk');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 // ============================================================================
 // Rate Limiters
@@ -92,7 +92,7 @@ async function checkStellarHorizon(requestId) {
       (process.env.STELLAR_NETWORK === 'mainnet' 
         ? 'https://horizon.stellar.org' 
         : 'https://horizon-testnet.stellar.org');
-    const server = new Server(horizonUrl);
+    const server = new StellarSdk.Horizon.Server(horizonUrl);
     await server.root();
     const duration = Date.now() - startTime;
     logger.info(JSON.stringify({ requestId: requestId || null, event: 'horizon_health_check', status: 'ok', responseTime: `${duration}ms` }));

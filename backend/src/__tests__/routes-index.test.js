@@ -10,20 +10,35 @@ process.env.RATE_LIMIT_AUTH_MAX = '10000';
 process.env.RATE_LIMIT_ORDER_MAX = '10000';
 process.env.RATE_LIMIT_SEND_MAX = '10000';
 
+jest.mock('@stellar/stellar-sdk', () => {
+  const actual = jest.requireActual('@stellar/stellar-sdk');
+  return {
+    ...actual,
+    Horizon: {
+      ...actual.Horizon,
+      Server: jest.fn().mockImplementation(() => ({
+        root: jest.fn().mockResolvedValue({}),
+      })),
+    },
+  };
+});
+
 const request = require('supertest');
+const StellarSdk = require('@stellar/stellar-sdk');
 const app = require('../app');
 
 // ── route registration: legacy vs v1 paths ───────────────────────────────
 describe('routes/index.js — dual path registration via registerRoute', () => {
   it('GET /api/health returns a response (legacy path)', async () => {
     const res = await request(app).get('/api/health');
-    expect([200, 503]).toContain(res.status);
+    expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('status');
+    expect(StellarSdk.Horizon.Server).toHaveBeenCalled();
   });
 
   it('GET /api/v1/health returns a response (v1 path)', async () => {
     const res = await request(app).get('/api/v1/health');
-    expect([200, 503]).toContain(res.status);
+    expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('status');
   });
 
