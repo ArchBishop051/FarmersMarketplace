@@ -53,7 +53,7 @@ describe('POST /api/reviews', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 when order is not paid or not owned by buyer', async () => {
+  it('returns 403 when order is not reviewable or not owned by buyer', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // order not found
     const res = await request(app)
@@ -123,6 +123,38 @@ describe('POST /api/reviews', () => {
       .send({ rating: 4 });
     expect(res.status).toBe(400);
   });
+
+  it('allows a delivered order to be reviewed', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ ...paidOrder, status: 'delivered' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ id: 2 }], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/reviews')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ order_id: 10, rating: 4 });
+
+    expect(res.status).toBe(201);
+    expect(mockQuery.mock.calls[0][0]).toContain("'delivered'");
+    expect(mockQuery.mock.calls[0][0]).toContain("'completed'");
+  });
+
+  it('rejects non-numeric ratings without querying orders', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const res = await request(app)
+      .post('/api/reviews')
+      .set('Authorization', `Bearer ${buyerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ order_id: 10, rating: '5x' });
+
+    expect(res.status).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/products/:id/reviews', () => {
@@ -143,6 +175,7 @@ describe('GET /api/products/:id/reviews', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].reviewer_name).toBe('Alice');
+    expect(mockQuery.mock.calls[0][0]).toContain("r.status = 'approved'");
   });
 
   it('returns empty array when no reviews exist', async () => {

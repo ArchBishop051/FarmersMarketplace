@@ -171,3 +171,31 @@ describe('PATCH /api/products/:id/restock — back-in-stock alerts', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('POST /api/products/:id/restock compatibility alias', () => {
+  test('uses the same restock workflow as PATCH', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ id: 5, name: 'Tomatoes', quantity: 0, farmer_id: 2 }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    const res = await request(app)
+      .post('/api/products/5/restock')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .send({ quantity: 10 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.waitlist.processed).toBe(0);
+    expect(mockQuery.mock.calls.map(([sql]) => sql)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('SELECT * FROM products'),
+        expect.stringContaining('UPDATE products SET quantity'),
+        expect.stringContaining('SELECT u.email, u.name FROM stock_alerts'),
+      ])
+    );
+  });
+});

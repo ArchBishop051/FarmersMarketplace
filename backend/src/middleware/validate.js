@@ -91,6 +91,13 @@ module.exports = {
     min_order_quantity: z.coerce.number().int().positive('min_order_quantity must be a positive integer').optional(),
     pricing_model: z.enum(['fixed', 'pwyw', 'donation']).default('fixed'),
     min_price: z.coerce.number().nonnegative('min_price must be non-negative').optional(),
+    weight_kg: z.coerce.number().positive('weight_kg must be a positive number').optional(),
+    is_preorder: z.union([z.boolean(), z.literal(0), z.literal(1), z.enum(['0', '1'])]).optional(),
+    preorder_delivery_date: z.string().nullable().optional(),
+    allergens: z.array(z.string()).optional(),
+    allowed_regions: z.array(z.string()).optional(),
+    available_from: z.string().nullable().optional(),
+    available_until: z.string().nullable().optional(),
   }).refine(d => {
     if (d.pricing_type === 'weight') {
       if (!d.min_weight || !d.max_weight) return false;
@@ -166,7 +173,7 @@ module.exports = {
 
   review: validate(
     z.object({
-      product_id: z.coerce.number().int().positive('product_id must be a positive integer'),
+      order_id: z.coerce.number().int().positive('order_id must be a positive integer'),
       rating: z.coerce.number().int().min(1).max(5, 'rating must be an integer between 1 and 5'),
       comment: z.string().max(1000, 'comment must be 1000 characters or fewer').optional(),
     })
