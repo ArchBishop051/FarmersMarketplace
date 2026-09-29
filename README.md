@@ -517,3 +517,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1308 -->
 - #1308: Streams created by `release_to_stream` can never be withdrawn or cancelled
+
+<!-- handsoff-issue-1309 -->
+- #1309: Payment-stream storage entries are never TTL-extended
