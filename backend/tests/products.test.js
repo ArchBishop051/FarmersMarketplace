@@ -217,6 +217,35 @@ describe('GET /api/products/:id', () => {
   });
 });
 
+describe('product availability schedule routes', () => {
+  it('updates the product availability field', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1, available_until: null }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    const res = await request(app)
+      .put('/api/products/1/schedule')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .send({ available_from: '2099-01-01T00:00:00Z' });
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][0]).toContain('UPDATE products SET available_from');
+  });
+
+  it('removes the product availability schedule', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    const res = await request(app)
+      .delete('/api/products/1/schedule')
+      .set('Authorization', `Bearer ${farmerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][0]).toContain('UPDATE products SET available_from = NULL');
+  });
+});
+
 describe('GET /api/products/mine/list', () => {
   it("returns farmer's own products", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 1, name: 'Beans' }], rowCount: 1 });

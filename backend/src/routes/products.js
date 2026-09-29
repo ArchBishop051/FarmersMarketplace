@@ -160,26 +160,34 @@ router.get('/allergens', (req, res) => {
 });
 
 // GET /api/products/:id
-router.get('/:id', (req, res) => {
-  const product = db.prepare(`
+router.get('/:id', async (req, res) => {
+  const { rows } = await db.query(`
     SELECT p.*, u.name AS farmer_name, u.stellar_public_key AS farmer_wallet
     FROM products p
     JOIN users u ON p.farmer_id = u.id
-    WHERE p.id = ?
-  `).get(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+    WHERE p.id = $1
+  `, [req.params.id]);
+  const product = rows[0];
+  if (!product) return err(res, 404, 'Product not found', 'not_found');
 
-  // #616 — hide product if not yet available per scheduling
-  const schedule = db.prepare('SELECT available_from FROM product_scheduling WHERE product_id = ?')
-    .get(product.id);
-  if (schedule && new Date(schedule.available_from) > new Date()) {
+  if (product.available_from && new Date(product.available_from) > new Date()) {
     return res.status(404).json({
-      error: 'Product not yet available',
-      available_from: schedule.available_from,
+      success: false,
+      error: 'not_yet_available',
+      message: 'Product not yet available',
+      code: 'not_yet_available',
+      available_from: product.available_from,
     });
   }
 
-  res.json(product);
+  res.json({
+    success: true,
+    data: {
+      ...product,
+      avg_rating: product.avg_rating ?? 0,
+      review_count: product.review_count ?? 0,
+    },
+  });
 });
 
 /**
@@ -280,103 +288,58 @@ router.post('/', auth, requireEmailVerified, validate.product, async (req, res) 
 });
 
 // PUT /api/products/:id/schedule - farmer sets or updates pre-order availability
-router.put('/:id/schedule', auth, (req, res) => {
+router.put('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Only farmers can schedule products' });
+    return err(res, 403, 'Only farmers can schedule products', 'forbidden');
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
-  if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
+  const { rows } = await db.query(
+    'SELECT id, available_until FROM products WHERE id = $1 AND farmer_id = $2',
+    [req.params.id, req.user.id]
+  );
+  const product = rows[0];
+  if (!product) return err(res, 404, 'Product not found or not yours', 'not_found');
 
   const { available_from } = req.body;
   if (!available_from)
-    return res.status(400).json({ error: 'available_from required (ISO 8601 datetime)' });
+    return err(res, 400, 'available_from required (ISO 8601 datetime)', 'validation_error');
+  const availableFromDate = new Date(available_from);
+  if (Number.isNaN(availableFromDate.getTime()))
+    return err(res, 400, 'available_from must be a valid date', 'validation_error');
+  if (product.available_until && availableFromDate >= new Date(product.available_until))
+    return err(res, 400, 'available_from must be before available_until', 'validation_error');
 
-  db.prepare(`
-    INSERT INTO product_scheduling (product_id, available_from)
-    VALUES (?, ?)
-    ON CONFLICT(product_id) DO UPDATE SET available_from = excluded.available_from
-  `).run(req.params.id, available_from);
+  await db.query('UPDATE products SET available_from = $1 WHERE id = $2', [available_from, req.params.id]);
+  await cache.delByPattern('products:*');
 
   res.json({ message: 'Schedule updated', product_id: req.params.id, available_from });
 });
 
 // DELETE /api/products/:id/schedule - farmer removes scheduling (makes immediately available)
-router.delete('/:id/schedule', auth, (req, res) => {
+router.delete('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
+    return err(res, 403, 'Farmers only', 'forbidden');
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
-  if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
+  const { rows } = await db.query(
+    'SELECT id FROM products WHERE id = $1 AND farmer_id = $2',
+    [req.params.id, req.user.id]
+  );
+  if (!rows[0]) return err(res, 404, 'Product not found or not yours', 'not_found');
 
-  db.prepare('DELETE FROM product_scheduling WHERE product_id = ?').run(req.params.id);
+  await db.query('UPDATE products SET available_from = NULL WHERE id = $1', [req.params.id]);
+  await cache.delByPattern('products:*');
   res.json({ message: 'Schedule removed, product is now immediately available' });
 });
 
 // GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
-router.get('/mine/list', auth, (req, res) => {
+router.get('/mine/list', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
+    return err(res, 403, 'Farmers only', 'forbidden');
 
-  const products = db.prepare(`
-    SELECT p.*, ps.available_from
-    FROM products p
-    LEFT JOIN product_scheduling ps ON p.id = ps.product_id
-    WHERE p.farmer_id = ?
-    ORDER BY p.created_at DESC
-  `).all(req.user.id);
-  res.json(products);
-});
-
-// PUT /api/products/:id/schedule - farmer sets or updates pre-order availability
-router.put('/:id/schedule', auth, (req, res) => {
-  if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Only farmers can schedule products' });
-
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
-  if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
-
-  const { available_from } = req.body;
-  if (!available_from)
-    return res.status(400).json({ error: 'available_from required (ISO 8601 datetime)' });
-
-  db.prepare(`
-    INSERT INTO product_scheduling (product_id, available_from)
-    VALUES (?, ?)
-    ON CONFLICT(product_id) DO UPDATE SET available_from = excluded.available_from
-  `).run(req.params.id, available_from);
-
-  res.json({ message: 'Schedule updated', product_id: req.params.id, available_from });
-});
-
-// DELETE /api/products/:id/schedule - farmer removes scheduling (makes immediately available)
-router.delete('/:id/schedule', auth, (req, res) => {
-  if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
-
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
-  if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
-
-  db.prepare('DELETE FROM product_scheduling WHERE product_id = ?').run(req.params.id);
-  res.json({ message: 'Schedule removed, product is now immediately available' });
-});
-
-// GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
-router.get('/mine/list', auth, (req, res) => {
-  if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
-
-  const products = db.prepare(`
-    SELECT p.*, ps.available_from
-    FROM products p
-    LEFT JOIN product_scheduling ps ON p.id = ps.product_id
-    WHERE p.farmer_id = ?
-    ORDER BY p.created_at DESC
-  `).all(req.user.id);
-  res.json(products);
+  const { rows } = await db.query(
+    'SELECT * FROM products WHERE farmer_id = $1 ORDER BY created_at DESC',
+    [req.user.id]
+  );
+  res.json({ success: true, data: rows });
 });
 
 // PATCH /api/products/:id
@@ -553,8 +516,7 @@ router.delete('/:id', auth, async (req, res) => {
   res.json({ success: true, message: 'Deleted' });
 });
 
-// PATCH /api/products/:id/restock
-router.patch('/:id/restock', auth, async (req, res) => {
+async function restockProduct(req, res) {
   if (req.user.role !== 'farmer') return err(res, 403, 'Only farmers can restock products', 'forbidden');
   const quantity = parseInt(req.body.quantity, 10);
   if (Number.isNaN(quantity) || quantity <= 0) return err(res, 400, 'Quantity must be a positive integer', 'validation_error');
@@ -566,6 +528,7 @@ router.patch('/:id/restock', auth, async (req, res) => {
 
     const wasOutOfStock = product.quantity === 0;
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, req.params.id]);
+    await cache.delByPattern('products:*');
 
     let waitlistResults = null;
     if (wasOutOfStock) {
@@ -599,7 +562,11 @@ router.patch('/:id/restock', auth, async (req, res) => {
     logger.error('[Restock] Error processing restock', { error: error.message, stack: error.stack });
     return err(res, 500, 'Internal server error during restock', 'internal_error');
   }
-});
+}
+
+router.patch('/:id/restock', auth, restockProduct);
+// Preserve the old POST method while sharing the canonical restock behavior.
+router.post('/:id/restock', auth, restockProduct);
 
 // POST /api/products/:id/alert
 router.post('/:id/alert', auth, async (req, res) => {
@@ -673,18 +640,6 @@ router.post('/:id/images', auth, async (req, res) => {
     if (images.length > 0) await db.query('UPDATE products SET image_url = $1 WHERE id = $2', [images[0].url, req.params.id]);
     res.json({ success: true, data: images });
   });
-});
-
-// GET /api/products/:id
-router.get('/:id', (req, res) => {
-  const product = db.prepare(`
-    SELECT p.*, u.name as farmer_name, u.stellar_public_key as farmer_wallet,
-           COALESCE(p.avg_rating, 0) as avg_rating,
-           COALESCE(p.review_count, 0) as review_count
-    FROM products p JOIN users u ON p.farmer_id = u.id WHERE p.id = ?
-  `).get(req.params.id);
-  if (!product) return err(res, 404, 'Product not found', 'not_found');
-  res.json({ success: true, data: product });
 });
 
 // DELETE /api/products/:id/images/:imgId
@@ -947,64 +902,6 @@ router.get('/:id/batches', async (req, res) => {
     [prodRows[0].batch_id],
   );
   res.json({ success: true, data: rows });
-});
-
-// POST /api/products/:id/restock — farmer adds stock; triggers back-in-stock notifications (once per restock)
-router.post('/:id/restock', auth, (req, res) => {
-  if (req.user.role !== 'farmer') return res.status(403).json({ error: 'Farmers only' });
-
-  const quantity = parseInt(req.body.quantity, 10);
-  if (isNaN(quantity) || quantity < 1) return res.status(400).json({ error: 'quantity must be a positive integer' });
-
-  const product = db.prepare('SELECT * FROM products WHERE id = ? AND farmer_id = ?').get(req.params.id, req.user.id);
-  if (!product) return res.status(404).json({ error: 'Not found or not yours' });
-
-  const wasOutOfStock = product.quantity === 0;
-  db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?').run(quantity, product.id);
-
-  // Only notify if the product was out of stock and hasn't fired a notification for this restock yet.
-  if (!wasOutOfStock || product.restock_notified_at) {
-    return res.json({ message: 'Restocked', quantity: product.quantity + quantity });
-  }
-
-  // Stamp immediately to prevent duplicate sends on concurrent requests.
-  db.prepare('UPDATE products SET restock_notified_at = CURRENT_TIMESTAMP WHERE id = ?').run(product.id);
-
-  // Gather unique buyer IDs from both favourites and waitlists.
-  const buyerIds = [
-    ...db.prepare('SELECT user_id FROM favourites WHERE product_id = ?').all(product.id),
-    ...db.prepare('SELECT user_id FROM waitlists WHERE product_id = ?').all(product.id),
-  ]
-    .map(r => r.user_id)
-    .filter((v, i, a) => a.indexOf(v) === i);
-
-  if (buyerIds.length === 0) return res.json({ message: 'Restocked', notified: 0 });
-
-  const updatedProduct = { ...product, quantity: product.quantity + quantity };
-
-  // Fire-and-forget — don't block the HTTP response.
-  Promise.allSettled(
-    buyerIds.map(async (userId) => {
-      const user = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(userId);
-      if (!user) return;
-
-      const sub = db.prepare('SELECT subscription_json FROM push_subscriptions WHERE user_id = ?').get(userId);
-
-      await Promise.allSettled([
-        sendBackInStockEmail({ user, product: updatedProduct }),
-        sendPushToUser({
-          subscription: sub ? JSON.parse(sub.subscription_json) : null,
-          payload: {
-            title: 'Back in stock',
-            body: `${updatedProduct.name} is available again!`,
-            url: `/products/${updatedProduct.id}`,
-          },
-        }),
-      ]);
-    })
-  ).catch(err => logger.error('Restock notification error', { error: err.message }));
-
-  res.json({ message: 'Restocked', notified: buyerIds.length });
 });
 
 module.exports = router;
