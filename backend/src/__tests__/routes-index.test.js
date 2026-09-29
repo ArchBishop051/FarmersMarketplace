@@ -90,6 +90,14 @@ describe('routes/index.js — SEO endpoints', () => {
 
 // ── rate-limiter scope: fund/send only on their own paths ────────────────
 describe('routes/index.js — rate limiters scoped to correct paths', () => {
+  it('counts each /api/v1 request once against the general limiter', async () => {
+    const first = await request(app).get('/api/v1/products');
+    const second = await request(app).get('/api/v1/products');
+    const remaining = (response) => Number(response.headers.ratelimit.match(/remaining=(\d+)/)[1]);
+
+    expect(remaining(first) - remaining(second)).toBe(1);
+  });
+
   it('wallet/fund limiter header present on /api/wallet/fund', async () => {
     // Any response (even 401) proves the limiter middleware ran and the route is mounted
     const res = await request(app).post('/api/wallet/fund').send({});

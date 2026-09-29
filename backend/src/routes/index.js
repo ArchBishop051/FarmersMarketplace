@@ -295,7 +295,6 @@ router.get('/api/v1/health', async (req, res) => {
 // ============================================================================
 
 router.use('/api', generalLimiter);
-router.use('/api/v1', generalLimiter);
 router.use('/api/auth/login', authLimiter);
 router.use('/api/auth/register', authLimiter);
 router.use('/api/auth/refresh', authLimiter);
