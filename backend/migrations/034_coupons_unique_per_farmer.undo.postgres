@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_coupons_farmer_code;
+ALTER TABLE coupons ADD CONSTRAINT coupons_code_key UNIQUE(code);

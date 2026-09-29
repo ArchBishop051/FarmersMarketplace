@@ -7,15 +7,6 @@ const SECRET = process.env.JWT_SECRET || 'test-secret-for-jest';
 const farmerToken = jwt.sign({ id: 1, role: 'farmer' }, SECRET);
 const buyerToken = jwt.sign({ id: 2, role: 'buyer' }, SECRET);
 
-// coupons.js uses the legacy prepare() API (SQLite sync)
-function mockPrepare(getResult, allResult, runResult) {
-  mockDb.prepare.mockReturnValue({
-    get: jest.fn().mockReturnValue(getResult),
-    all: jest.fn().mockReturnValue(allResult ?? []),
-    run: jest.fn().mockReturnValue(runResult ?? { lastInsertRowid: 1, changes: 1 }),
-  });
-}
-
 beforeEach(() => {
   jest.clearAllMocks();
   mockDb.query.mockResolvedValue({ rows: [], rowCount: 0 });
@@ -79,13 +70,40 @@ describe('POST /api/coupons', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns 400 when percent discount would make the order free', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const res = await request(app)
+      .post('/api/coupons')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ code: 'FREE', discount_type: 'percent', discount_value: 100 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('validation_error');
+  });
+
+  it('validates usage limits and expiration dates', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    const invalidLimit = await request(app)
+      .post('/api/coupons')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ code: 'SAVE', discount_type: 'fixed', discount_value: 5, max_uses_per_user: 0 });
+    expect(invalidLimit.status).toBe(400);
+
+    const invalidExpiry = await request(app)
+      .post('/api/coupons')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({ code: 'SAVE', discount_type: 'fixed', discount_value: 5, expires_at: 'not-a-date' });
+    expect(invalidExpiry.status).toBe(400);
+  });
+
   it('returns 409 on duplicate coupon code', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockDb.prepare.mockReturnValue({
-      run: jest.fn().mockImplementation(() => {
-        throw new Error('UNIQUE constraint failed');
-      }),
-    });
+    mockDb.query.mockRejectedValueOnce(new Error('UNIQUE constraint failed'));
     const res = await request(app)
       .post('/api/coupons')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -98,9 +116,7 @@ describe('POST /api/coupons', () => {
 
   it('farmer creates a percent coupon successfully', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockDb.prepare.mockReturnValue({
-      run: jest.fn().mockReturnValue({ lastInsertRowid: 7 }),
-    });
+    mockDb.query.mockResolvedValueOnce({ rows: [{ id: 7 }], rowCount: 1 });
     const res = await request(app)
       .post('/api/coupons')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -111,6 +127,35 @@ describe('POST /api/coupons', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.id).toBe(7);
     expect(res.body.code).toBe('SUMMER20'); // uppercased
+  });
+
+  it('saves per-user limits and allows a farmer-scoped code', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    mockDb.query.mockResolvedValueOnce({ rows: [{ id: 8 }], rowCount: 1 });
+    const res = await request(app)
+      .post('/api/coupons')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({
+        code: 'summer10',
+        discount_type: 'fixed',
+        discount_value: 10,
+        max_uses: 20,
+        max_uses_per_user: 2,
+        expires_at: '2030-01-01',
+      });
+    expect(res.status).toBe(200);
+    expect(mockDb.query.mock.calls[0][0]).toContain('max_uses_per_user');
+    expect(mockDb.query.mock.calls[0][1]).toEqual([
+      1,
+      'SUMMER10',
+      'fixed',
+      10,
+      20,
+      2,
+      new Date('2030-01-01').toISOString(),
+    ]);
   });
 });
 
@@ -128,7 +173,7 @@ describe('GET /api/coupons', () => {
 
   it('returns farmer coupons list', async () => {
     const coupons = [{ id: 1, code: 'SAVE10', discount_type: 'percent', discount_value: 10 }];
-    mockDb.prepare.mockReturnValue({ all: jest.fn().mockReturnValue(coupons) });
+    mockDb.query.mockResolvedValueOnce({ rows: coupons, rowCount: 1 });
     const res = await request(app)
       .get('/api/coupons')
       .set('Authorization', `Bearer ${farmerToken}`);
@@ -138,7 +183,7 @@ describe('GET /api/coupons', () => {
   });
 
   it('returns empty array when farmer has no coupons', async () => {
-    mockDb.prepare.mockReturnValue({ all: jest.fn().mockReturnValue([]) });
+    mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .get('/api/coupons')
       .set('Authorization', `Bearer ${farmerToken}`);
@@ -161,7 +206,7 @@ describe('DELETE /api/coupons/:id', () => {
 
   it('returns 404 when coupon not found or belongs to another farmer', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockDb.prepare.mockReturnValue({ get: jest.fn().mockReturnValue(null) });
+    mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .delete('/api/coupons/99')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -172,11 +217,7 @@ describe('DELETE /api/coupons/:id', () => {
 
   it('farmer deletes own coupon successfully', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    const runMock = jest.fn();
-    mockDb.prepare.mockReturnValue({
-      get: jest.fn().mockReturnValue({ id: 1, farmer_id: 1, code: 'SAVE10' }),
-      run: runMock,
-    });
+    mockDb.query.mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 });
     const res = await request(app)
       .delete('/api/coupons/1')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -184,6 +225,10 @@ describe('DELETE /api/coupons/:id', () => {
       .set('X-CSRF-Token', csrf);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
+    expect(mockDb.query).toHaveBeenCalledWith(
+      'DELETE FROM coupons WHERE id = $1 AND farmer_id = $2 RETURNING id',
+      ['1', 1]
+    );
   });
 });
 
@@ -202,7 +247,7 @@ describe('POST /api/coupons/validate', () => {
 
   it('returns 404 when product does not exist', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockDb.prepare.mockReturnValue({ get: jest.fn().mockReturnValue(null) });
+    mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -214,9 +259,11 @@ describe('POST /api/coupons/validate', () => {
 
   it('returns 400 for invalid coupon code', async () => {
     const { token: csrf, cookieStr } = await getCsrf();
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 10, farmer_id: 1 }) }) // product
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(null) }); // coupon not found
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 10, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 10 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -238,9 +285,11 @@ describe('POST /api/coupons/validate', () => {
       max_uses: null,
       used_count: 0,
     };
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 10, farmer_id: 1 }) })
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(expiredCoupon) });
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 10, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 10 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [expiredCoupon], rowCount: 1 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -262,9 +311,11 @@ describe('POST /api/coupons/validate', () => {
       max_uses: 10,
       used_count: 10,
     };
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 20, farmer_id: 1 }) })
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(exhaustedCoupon) });
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 20, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 20 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [exhaustedCoupon], rowCount: 1 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -286,9 +337,11 @@ describe('POST /api/coupons/validate', () => {
       max_uses: null,
       used_count: 0,
     };
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 10, farmer_id: 1 }) })
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(wrongFarmerCoupon) });
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 10, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 10 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -310,9 +363,11 @@ describe('POST /api/coupons/validate', () => {
       max_uses: null,
       used_count: 0,
     };
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 50, farmer_id: 1 }) })
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(validCoupon) });
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 50, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 50 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [validCoupon], rowCount: 1 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -335,9 +390,11 @@ describe('POST /api/coupons/validate', () => {
       max_uses: null,
       used_count: 0,
     };
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ id: 1, price: 5, farmer_id: 1 }) })
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(validCoupon) });
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 1, price: 5, farmer_id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ price: 5 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [validCoupon], rowCount: 1 });
     const res = await request(app)
       .post('/api/coupons/validate')
       .set('Authorization', `Bearer ${buyerToken}`)
@@ -364,24 +421,56 @@ describe('resolveCoupon — per-user limit', () => {
     max_uses_per_user: 1,
   };
 
-  it('first use succeeds when user has not used the coupon yet', () => {
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(validCoupon) })   // coupon lookup
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ cnt: 0 }) });   // coupon_uses count = 0
+  it('first use succeeds when user has not used the coupon yet', async () => {
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [validCoupon], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ cnt: 0 }], rowCount: 1 });
 
-    const result = resolveCoupon('ONCE', 1, 2);
+    const result = await resolveCoupon('ONCE', 1, 2);
     expect(result.coupon).toBeDefined();
     expect(result.error).toBeUndefined();
   });
 
-  it('second use by same buyer returns coupon_already_used', () => {
-    mockDb.prepare
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue(validCoupon) })   // coupon lookup
-      .mockReturnValueOnce({ get: jest.fn().mockReturnValue({ cnt: 1 }) });   // coupon_uses count = 1
+  it('second use by same buyer returns coupon_already_used', async () => {
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [validCoupon], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ cnt: 1 }], rowCount: 1 });
 
-    const result = resolveCoupon('ONCE', 1, 2);
+    const result = await resolveCoupon('ONCE', 1, 2);
     expect(result.error).toBe('Coupon already used');
     expect(result.code).toBe('coupon_already_used');
   });
 });
 
+describe('coupon usage reservations', () => {
+  const { reserveCoupon, releaseCoupon } = require('../src/routes/coupons');
+
+  it('atomically checks global and per-user limits before reserving a use', async () => {
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ used_count: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 10 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 22 }], rowCount: 1 });
+
+    await expect(reserveCoupon(10, 2)).resolves.toBe(22);
+    expect(mockDb.query.mock.calls[0][0]).toContain('coupon_user_usage');
+    expect(mockDb.query.mock.calls[0][0]).toContain('used_count < coupons.max_uses_per_user');
+    expect(mockDb.query.mock.calls[1][0]).toContain('used_count < max_uses');
+  });
+
+  it('does not create a use when a usage limit is reached', async () => {
+    mockDb.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    await expect(reserveCoupon(10, 2)).resolves.toBeNull();
+    expect(mockDb.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a reservation and returns its quota', async () => {
+    mockDb.query
+      .mockResolvedValueOnce({ rows: [{ id: 22 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    await releaseCoupon(10, 2, 22);
+    expect(mockDb.query.mock.calls[0][0]).toContain('DELETE FROM coupon_uses');
+    expect(mockDb.query.mock.calls[1][0]).toContain('used_count = used_count - 1');
+  });
+});

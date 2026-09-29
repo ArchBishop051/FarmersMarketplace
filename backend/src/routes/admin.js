@@ -4,6 +4,7 @@ const adminAuth = require('../middleware/adminAuth');
 const auth = require('../middleware/auth');
 const requireAdmin = require('../middleware/requireAdmin');
 const { sendPayment } = require('../utils/stellar');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 // GET /api/admin/returns - list all return requests
 router.get('/returns', adminAuth, (req, res) => {
@@ -42,7 +43,7 @@ router.post('/returns/:id/approve', adminAuth, async (req, res) => {
 
   try {
     const txHash = await sendPayment({
-      senderSecret: ret.farmer_secret,
+      senderSecret: await decryptUserSecretKey(ret.farmer_secret),
       receiverPublicKey: ret.buyer_wallet,
       amount: refundAmount,
       memo: `Refund#${ret.id}`,

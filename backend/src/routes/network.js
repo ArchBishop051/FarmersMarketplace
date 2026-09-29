@@ -31,7 +31,10 @@ const PEER_CACHE_TTL = 5 * 60; // 5 minutes in seconds
 let _keyPair = null;
 function keyPair() {
   if (_keyPair) return _keyPair;
-  const seed = process.env.NETWORK_SIGNING_SECRET || process.env.JWT_SECRET || 'default-dev-seed';
+  const seed = process.env.NETWORK_SIGNING_SECRET || process.env.JWT_SECRET;
+  if (!seed) {
+    throw new Error('NETWORK_SIGNING_SECRET or JWT_SECRET must be configured');
+  }
   const seedBuf = crypto.createHash('sha256').update(seed).digest(); // 32 bytes
   // Build PKCS8 DER for Ed25519: fixed 16-byte header + 32-byte seed
   const pkcs8Header = Buffer.from('302e020100300506032b657004220420', 'hex');

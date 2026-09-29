@@ -2,6 +2,7 @@
 
 const db = require('../db/schema');
 const { sendPayment } = require('../utils/stellar');
+const { decryptUserSecretKey } = require('../utils/crypto');
 const mailer = require('../utils/mailer');
 const logger = require('../logger');
 
@@ -133,7 +134,7 @@ async function closeExpiredAuctions() {
 
     try {
       const txHash = await sendPayment({
-        senderSecret: winner.buyer_secret,
+        senderSecret: await decryptUserSecretKey(winner.buyer_secret),
         receiverPublicKey: auction.farmer_wallet,
         amount: winner.amount,
         memo: `Auction#${auction.id}`,

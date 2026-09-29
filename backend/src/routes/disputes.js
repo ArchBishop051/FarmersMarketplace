@@ -7,6 +7,7 @@ const { burnRewardTokens, invokeEscrowContract } = require('../utils/stellar');
 const { sendPushToUser } = require('../utils/pushNotifications');
 const logger = require('../logger');
 const { writeAuditLog } = require('../utils/auditLog');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 const DISPUTE_WINDOW_HOURS = parseInt(process.env.DISPUTE_WINDOW_HOURS || '72', 10);
 
@@ -56,7 +57,7 @@ router.post('/', auth, validate.dispute, async (req, res, next) => {
     if (buyer?.stellar_secret_key) {
       invokeEscrowContract({
         action: 'dispute',
-        senderSecret: buyer.stellar_secret_key,
+        senderSecret: await decryptUserSecretKey(buyer.stellar_secret_key),
         orderId: order_id,
         buyerPublicKey: buyer.stellar_public_key,
         farmerPublicKey: order.farmer_wallet,
@@ -140,7 +141,7 @@ router.patch('/:id/resolve', auth, async (req, res, next) => {
     if (adminSecret) {
       const escrowPayload = {
         action: 'dispute',
-        senderSecret: adminSecret,
+        senderSecret: await decryptUserSecretKey(adminSecret),
         orderId: dispute.order_id,
         buyerPublicKey: buyer?.stellar_public_key,
         farmerPublicKey: farmer?.stellar_public_key,

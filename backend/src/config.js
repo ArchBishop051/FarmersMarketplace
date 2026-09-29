@@ -6,7 +6,14 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
 
   // Auth — required
-  JWT_SECRET: z.string().min(1, 'JWT_SECRET is required'),
+  JWT_SECRET: z.string().min(1, 'JWT_SECRET is required').superRefine((secret, ctx) => {
+    if (process.env.NODE_ENV === 'production' && Buffer.byteLength(secret, 'utf8') < 32) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'JWT_SECRET must be at least 32 bytes in production',
+      });
+    }
+  }),
   REFRESH_TOKEN_SECRET: z.string().optional(),
 
   // Stellar

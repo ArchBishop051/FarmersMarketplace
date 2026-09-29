@@ -22,6 +22,7 @@ const { resolveFederationAddress, FederationError } = require('../utils/stellar-
 const { claimBalance } = require('../utils/stellar-payments');
 const { err } = require('../middleware/error');
 const config = require('../config');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 const BASE_RESERVE_XLM = 1;
 
@@ -249,7 +250,7 @@ router.post('/send', auth, validate.sendXLM, async (req, res) => {
     }
 
     const txHash = await sendPayment({
-      senderSecret: user.stellar_secret_key,
+      senderSecret: await decryptUserSecretKey(user.stellar_secret_key),
       receiverPublicKey: destination,
       amount,
       memo: memo || '',
@@ -311,7 +312,7 @@ router.post('/withdraw', auth, async (req, res) => {
     }
 
     const txHash = await sendPayment({
-      senderSecret: user.stellar_secret_key,
+      senderSecret: await decryptUserSecretKey(user.stellar_secret_key),
       receiverPublicKey: destination,
       amount,
       memo: 'Wallet withdrawal',
@@ -378,7 +379,7 @@ router.post('/trustline', auth, async (req, res) => {
     if (!rows[0]) return err(res, 404, 'User not found', 'user_not_found');
 
     const txHash = await addTrustline({
-      secret: rows[0].stellar_secret_key,
+      secret: await decryptUserSecretKey(rows[0].stellar_secret_key),
       assetCode,
       assetIssuer,
     });
@@ -409,7 +410,7 @@ router.delete('/trustline', auth, async (req, res) => {
     if (!rows[0]) return err(res, 404, 'User not found', 'user_not_found');
 
     const txHash = await removeTrustline({
-      secret: rows[0].stellar_secret_key,
+      secret: await decryptUserSecretKey(rows[0].stellar_secret_key),
       assetCode,
       assetIssuer,
     });
@@ -472,7 +473,7 @@ router.post('/claim', auth, async (req, res) => {
     if (!rows[0]) return err(res, 404, 'User not found', 'user_not_found');
 
     const txHash = await claimBalance({
-      claimantSecret: rows[0].stellar_secret_key,
+      claimantSecret: await decryptUserSecretKey(rows[0].stellar_secret_key),
       balanceId: balance_id,
     });
 
@@ -528,7 +529,7 @@ router.post('/merge', auth, async (req, res) => {  const destination = String(re
 
   try {
     const txHash = await mergeAccount({
-      sourceSecret: user.stellar_secret_key,
+      sourceSecret: await decryptUserSecretKey(user.stellar_secret_key),
       destinationPublicKey: destination,
     });
 
@@ -581,4 +582,3 @@ router.get('/resolve-federation', auth, async (req, res) => {
 });
 
 module.exports = router;
-

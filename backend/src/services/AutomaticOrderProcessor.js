@@ -12,6 +12,7 @@ const { sendPayment, getBalance } = require('../utils/stellar');
 const { invokeEscrowContract } = require('../utils/stellar-contracts');
 const { sendOrderEmails } = require('../utils/mailer');
 const logger = require('../logger');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 // Default escrow timeout for automatic (waitlist) orders: 7 days from deposit.
 const DEFAULT_ESCROW_TIMEOUT_DAYS = 7;
@@ -325,7 +326,7 @@ class AutomaticOrderProcessor {
 
       const result = await invokeEscrowContract({
         action: 'deposit',
-        senderSecret: buyer.stellar_secret_key,
+        senderSecret: await decryptUserSecretKey(buyer.stellar_secret_key),
         orderId: order.id,
         buyerPublicKey: buyer.stellar_public_key,
         farmerPublicKey: farmer.stellar_public_key,
@@ -381,7 +382,7 @@ class AutomaticOrderProcessor {
       // Send payment using existing stellar utility
       // Use Order# prefix for on-chain reconciliation (order ID in memo)
       const txHash = await sendPayment({
-        senderSecret: buyer.stellar_secret_key,
+        senderSecret: await decryptUserSecretKey(buyer.stellar_secret_key),
         receiverPublicKey: farmer.stellar_public_key,
         amount: order.total_price,
         memo: `Order#${order.id}`,

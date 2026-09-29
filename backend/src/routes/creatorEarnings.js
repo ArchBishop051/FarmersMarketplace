@@ -7,6 +7,7 @@ const { simulateContractCall, invokeContract } = require('../utils/stellar');
 const { err } = require('../middleware/error');
 const { getCachedResponse, cacheResponse } = require('../utils/idempotency');
 const logger = require('../logger');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 const STROOPS_PER_XLM = 10_000_000;
 
@@ -268,7 +269,7 @@ router.post('/:address/claim', auth, async (req, res) => {
         { type: 'address', value: address },
         { type: 'address', value: tokenContractId },
       ],
-      signerSecret: farmer.stellar_secret_key,
+      signerSecret: await decryptUserSecretKey(farmer.stellar_secret_key),
     });
 
     const responseBody = {

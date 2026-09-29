@@ -77,6 +77,9 @@ function isPlaintext(value) {
 }
 
 async function decryptUserSecretKey(value) {
+  if (typeof value !== 'string' || !value.length) {
+    throw new Error('User Stellar secret key is missing');
+  }
   if (isPlaintext(value)) return value;
   return decrypt(value);
 }

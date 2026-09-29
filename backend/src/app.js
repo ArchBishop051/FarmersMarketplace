@@ -3,8 +3,15 @@ require('dotenv').config();
 const logger = require('./logger');
 const REQUIRED_ENV = ['JWT_SECRET'];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-if (missing.length) {
-  logger.error(`[FATAL] Missing required environment variables: ${missing.join(', ')}`);
+const weakJwtSecret =
+  process.env.NODE_ENV === 'production' &&
+  Buffer.byteLength(process.env.JWT_SECRET || '', 'utf8') < 32;
+if (missing.length || weakJwtSecret) {
+  logger.error(
+    `[FATAL] ${missing.length
+      ? `Missing required environment variables: ${missing.join(', ')}`
+      : 'JWT_SECRET must be at least 32 bytes in production'}`
+  );
   logger.error('Copy backend/.env.example to backend/.env and fill in the values.');
   process.exit(1);
 }
