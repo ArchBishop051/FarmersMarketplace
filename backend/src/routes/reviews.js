@@ -17,7 +17,7 @@ function recalcRating(productId) {
 }
 
 // GET /api/reviews/:productId - approved reviews only (public)
-router.get('/:productId', (req, res) => {
+router.get('/reviews/:productId', (req, res) => {
   const rows = db.prepare(`
     SELECT r.id, r.rating, r.body, r.created_at, u.name as buyer_name
     FROM reviews r JOIN users u ON r.buyer_id = u.id
@@ -64,7 +64,7 @@ router.get('/admin/reviews/pending', auth, (req, res) => {
 });
 
 // DELETE /api/reviews/:id - buyer deletes own review
-router.delete('/:id', auth, (req, res) => {
+router.delete('/reviews/:id', auth, (req, res) => {
   const review = db.prepare('SELECT * FROM reviews WHERE id = ? AND buyer_id = ?').get(req.params.id, req.user.id);
   if (!review) return err(res, 404, 'Review not found or not yours', 'not_found');
   db.prepare('DELETE FROM reviews WHERE id = ?').run(req.params.id);
@@ -76,7 +76,7 @@ const validate = require('../middleware/validate');
 const { sanitizeText } = require('../utils/sanitize');
 
 // POST /api/reviews
-router.post('/', auth, validate.review, async (req, res) => {
+router.post('/reviews', auth, validate.review, async (req, res) => {
   if (req.user.role !== 'buyer')
     return err(res, 403, 'Only buyers can submit reviews', 'forbidden');
 
