@@ -16,7 +16,8 @@ pub fn is_valid_id(id: &str) -> bool {
     if len < 3 || len > 64 {
         return false;
     }
-    id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    id.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]
@@ -44,11 +45,11 @@ mod tests {
 
     #[test]
     fn id_with_disallowed_characters_is_rejected() {
-        assert!(!is_valid_id("abc\ndef"));   // newline
-        assert!(!is_valid_id("abc\0def"));   // null byte
-        assert!(!is_valid_id("abc def"));    // space
-        assert!(!is_valid_id("abc!def"));    // exclamation mark
-        assert!(!is_valid_id("abc/def"));    // forward slash
+        assert!(!is_valid_id("abc\ndef")); // newline
+        assert!(!is_valid_id("abc\0def")); // null byte
+        assert!(!is_valid_id("abc def")); // space
+        assert!(!is_valid_id("abc!def")); // exclamation mark
+        assert!(!is_valid_id("abc/def")); // forward slash
     }
 
     #[test]
