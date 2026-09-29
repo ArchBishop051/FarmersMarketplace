@@ -514,3 +514,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1307 -->
 - #1307: Payment-stream `withdraw`/`cancel`/`top_up` take a caller-supplied token address, which can drain other assets
+
+<!-- handsoff-issue-1308 -->
+- #1308: Streams created by `release_to_stream` can never be withdrawn or cancelled
