@@ -4,6 +4,7 @@ const cron = require('node-cron');
 const logger = require('../logger');
 const db = require('../db/schema');
 const { sendPayment } = require('../utils/stellar');
+const { decryptUserSecretKey } = require('../utils/crypto');
 const { nextOrderDate } = require('../routes/subscriptions');
 const mailer = require('../utils/mailer');
 
@@ -142,7 +143,7 @@ async function processSubscriptions() {
     // Attempt Stellar payment
     try {
       const txHash = await sendPayment({
-        senderSecret: sub.buyer_secret,
+        senderSecret: await decryptUserSecretKey(sub.buyer_secret),
         receiverPublicKey: sub.farmer_wallet,
         amount: totalPrice,
         memo: `Sub#${sub.id}`,
@@ -176,30 +177,29 @@ async function processSubscriptions() {
       const retryCount = (current.retry_count || 0) + 1;
 
       if (isPermanentError(e) || retryCount > MAX_RETRIES) {
-<<<<<<< HEAD
-        db.prepare(
-          "UPDATE subscriptions SET status = 'payment_failed', active = 0, retry_count = ? WHERE id = ?"
-        ).run(retryCount, sub.id);
-
-        // Notify buyer that subscription payment has permanently failed
-        try {
-          const buyerRow = db.prepare('SELECT email, name FROM users WHERE id = ?').get(sub.buyer_id);
-          if (buyerRow) {
-            await mailer.sendSubscriptionPaymentFailedEmail({
-              buyer: buyerRow,
-              subscription: sub,
-            });
-          }
-        } catch (mailErr) {
-          logger.warn('[subscriptions] Failed to send payment_failed email', { subscriptionId: sub.id });
-        }
-
-=======
         await db.query(
           "UPDATE subscriptions SET status = 'failed', active = 0, retry_count = $1 WHERE id = $2",
           [retryCount, sub.id]
         );
->>>>>>> 58a75df (feat: improve email verification and password reset)
+
+        // Notify buyer that subscription payment has permanently failed
+        try {
+          const { rows: buyerRows } = await db.query(
+            'SELECT email, name FROM users WHERE id = $1',
+            [sub.buyer_id]
+          );
+          if (buyerRows[0]) {
+            await mailer.sendSubscriptionPaymentFailedEmail({
+              buyer: buyerRows[0],
+              subscription: sub,
+            });
+          }
+        } catch (mailErr) {
+          logger.warn('[subscriptions] Failed to send payment_failed email', {
+            subscriptionId: sub.id,
+            error: mailErr.message,
+          });
+        }
         logger.error(`[subscriptions] Sub ${sub.id} permanently failed`, {
           subscriptionId: sub.id,
           reason: isPermanentError(e) ? 'permanent_error' : 'retry_exhausted',

@@ -15,7 +15,7 @@ const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
 const { createWallet, server, networkPassphrase } = require('../utils/stellar');
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encrypt, decrypt, decryptUserSecretKey } = require('../utils/crypto');
 const logger = require('../logger');
 
 const MULTISIG_THRESHOLD_XLM = 50; // payments above this require multi-sig
@@ -247,7 +247,7 @@ router.post('/:id/transactions', auth, async (req, res) => {
       [req.user.id]
     );
     if (initiatorRows[0]?.stellar_secret_key) {
-      tx.sign(StellarSdk.Keypair.fromSecret(initiatorRows[0].stellar_secret_key));
+      tx.sign(StellarSdk.Keypair.fromSecret(await decryptUserSecretKey(initiatorRows[0].stellar_secret_key)));
     }
 
     xdr = tx.toXDR();
@@ -321,7 +321,7 @@ router.post('/transactions/:id/sign', auth, async (req, res) => {
   let tx;
   try {
     tx = new StellarSdk.Transaction(ptx.xdr, networkPassphrase);
-    tx.sign(StellarSdk.Keypair.fromSecret(userRows[0].stellar_secret_key));
+    tx.sign(StellarSdk.Keypair.fromSecret(await decryptUserSecretKey(userRows[0].stellar_secret_key)));
   } catch (e) {
     return err(res, 400, `Could not sign: ${e.message}`, 'sign_error');
   }

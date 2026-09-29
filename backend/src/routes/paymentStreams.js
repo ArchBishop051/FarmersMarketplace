@@ -23,6 +23,7 @@ const auth = require('../middleware/auth');
 const db = require('../db/schema');
 const { err } = require('../middleware/error');
 const { invokeContract, simulateContract } = require('../utils/stellar');
+const { decryptUserSecretKey } = require('../utils/crypto');
 
 function validateContractId(contractId) {
   return /^[A-Z2-7]{56}$|^[0-9a-fA-F]{64}$/.test(contractId);
@@ -45,7 +46,11 @@ async function getCallerStellarAddress(userId) {
   const { rows } = await db.query('SELECT stellar_public_key, stellar_secret_key FROM users WHERE id = $1', [
     userId,
   ]);
-  return rows[0] || null;
+  const caller = rows[0] || null;
+  if (caller?.stellar_secret_key) {
+    caller.stellar_secret_key = await decryptUserSecretKey(caller.stellar_secret_key);
+  }
+  return caller;
 }
 
 async function getStreamRow(contractId, streamId) {
