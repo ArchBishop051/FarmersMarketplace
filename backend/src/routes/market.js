@@ -30,7 +30,7 @@ router.get('/xlm-usdc', async (req, res) => {
 
 // GET /api/products/:id/qr — returns a PNG QR code for the product URL
 router.get('/:id/qr', async (req, res) => {
-  const product = db.prepare('SELECT id FROM products WHERE id = ?').get(req.params.id);
+  const product = (await db.query('SELECT id FROM products WHERE id = $1', [req.params.id])).rows[0];
   if (!product) return err(res, 404, 'Product not found', 'not_found');
 
   const frontendUrl = (
