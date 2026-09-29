@@ -511,3 +511,6 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 <!-- handsoff-issue-1306 -->
 - #1306: Escrow snapshots are non-durable and can be spammed
+
+<!-- handsoff-issue-1307 -->
+- #1307: Payment-stream `withdraw`/`cancel`/`top_up` take a caller-supplied token address, which can drain other assets
