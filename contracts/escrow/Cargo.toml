@@ -15,5 +15,15 @@ soroban-sdk = { version = "=22.0.0" }
 
 [dev-dependencies]
 soroban-sdk = { version = "=22.0.0", features = ["testutils"] }
+
+# Integration test crate for issue #1311: deploys the escrow and reward-token
+# contracts together and imports the reward token as a WASM via
+# `contractimport!`. The reward token lives in the sibling `contract/` layout
+# (SDK 21), so it is consumed here as a prebuilt WASM artifact rather than as a
+# path dependency — this keeps the two SDK generations from being unified
+# (see ADR 0001) while still exercising the cross-contract mint/burn path.
+[[test]]
+name = "reward_minting"
+path = "tests/reward_minting.rs"
 ed25519-dalek = "2"
 contract-test-utils = { path = "../test-utils" }
