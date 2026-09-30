@@ -510,6 +510,14 @@ For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md)
 
 ## Handsoff notes
 
+<!-- handsoff-issue-1302 -->
+- #1302: `set_auto_release_days` has no bounds, so an admin can set `0` and allow instant permissionless release
+
+<!-- handsoff-issue-1303 -->
+- #1303: `set_admin` is a single-step admin replacement that bypasses the two-step transfer
+
+<!-- handsoff-issue-1304 -->
+- #1304: Separate the "platform operator" role from the "fee destination" address (`init` vs `initialize`)
 <!-- handsoff-issue-1312 -->
 - #1312: Legacy `contract/` escrow never moves tokens: deposit/release/refund are bookkeeping only
 
