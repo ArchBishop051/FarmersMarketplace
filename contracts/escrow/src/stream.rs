@@ -15,8 +15,7 @@
 ///            + (t - last_checkpoint_at) * rate_per_second
 /// ```
 /// where `t` is the current ledger timestamp.
-
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, token, Address, Env};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -186,11 +185,7 @@ pub fn get_accrued_amount_on_chain(env: &Env, stream_id: u64) -> i128 {
 /// Allocate and return the next available stream ID.
 fn allocate_stream_id(env: &Env) -> u64 {
     let counter_key = soroban_sdk::symbol_short!("nextid");
-    let next_id: u64 = env
-        .storage()
-        .persistent()
-        .get(&counter_key)
-        .unwrap_or(1);
+    let next_id: u64 = env.storage().persistent().get(&counter_key).unwrap_or(1);
     env.storage().persistent().set(&counter_key, &(next_id + 1));
     next_id
 }
@@ -222,7 +217,10 @@ pub fn create_stream(
     let now = env.ledger().timestamp();
 
     assert!(deposit > 0, "deposit must be greater than zero");
-    assert!(rate_per_second > 0, "rate_per_second must be greater than zero");
+    assert!(
+        rate_per_second > 0,
+        "rate_per_second must be greater than zero"
+    );
     assert!(end_time > now, "end_time must be in the future");
 
     // Transfer deposit from sender to contract.
@@ -249,8 +247,18 @@ pub fn create_stream(
 
     // Emit StreamCreated event.
     env.events().publish(
-        (soroban_sdk::symbol_short!("stream"), soroban_sdk::symbol_short!("created")),
-        (stream_id, sender, recipient, deposit, rate_per_second, end_time),
+        (
+            soroban_sdk::symbol_short!("stream"),
+            soroban_sdk::symbol_short!("created"),
+        ),
+        (
+            stream_id,
+            sender,
+            recipient,
+            deposit,
+            rate_per_second,
+            end_time,
+        ),
     );
 
     stream_id
@@ -267,12 +275,7 @@ pub fn create_stream(
 ///
 /// # Returns
 /// The amount withdrawn (stroops).
-pub fn withdraw(
-    env: &Env,
-    stream_id: u64,
-    token: &Address,
-    recipient: &Address,
-) -> i128 {
+pub fn withdraw(env: &Env, stream_id: u64, token: &Address, recipient: &Address) -> i128 {
     recipient.require_auth();
 
     let key = StreamKey::Stream(stream_id);
@@ -282,7 +285,10 @@ pub fn withdraw(
         .get(&key)
         .expect("stream not found");
 
-    assert_eq!(stream.recipient, *recipient, "caller is not the stream recipient");
+    assert_eq!(
+        stream.recipient, *recipient,
+        "caller is not the stream recipient"
+    );
 
     let now = env.ledger().timestamp();
 
@@ -306,7 +312,10 @@ pub fn withdraw(
 
     // Emit Withdrawn event.
     env.events().publish(
-        (soroban_sdk::symbol_short!("stream"), soroban_sdk::symbol_short!("withdrawn")),
+        (
+            soroban_sdk::symbol_short!("stream"),
+            soroban_sdk::symbol_short!("withdrawn"),
+        ),
         (stream_id, recipient, withdrawable),
     );
 
@@ -324,11 +333,7 @@ pub fn withdraw(
 ///
 /// # Returns
 /// The refund amount (stroops).
-pub fn cancel_stream(
-    env: &Env,
-    stream_id: u64,
-    token: &Address,
-) -> i128 {
+pub fn cancel_stream(env: &Env, stream_id: u64, token: &Address) -> i128 {
     let key = StreamKey::Stream(stream_id);
     let mut stream: PaymentStream = env
         .storage()
@@ -361,7 +366,10 @@ pub fn cancel_stream(
 
     // Emit StreamCancelled event.
     env.events().publish(
-        (soroban_sdk::symbol_short!("stream"), soroban_sdk::symbol_short!("cancelled")),
+        (
+            soroban_sdk::symbol_short!("stream"),
+            soroban_sdk::symbol_short!("cancelled"),
+        ),
         (stream_id, &stream.sender, unaccrued),
     );
 
@@ -404,7 +412,10 @@ pub fn increase_rate_per_second(
         new_rate > stream.rate_per_second,
         "new_rate must be greater than the current rate"
     );
-    assert!(additional_deposit >= 0, "additional_deposit must be non-negative");
+    assert!(
+        additional_deposit >= 0,
+        "additional_deposit must be non-negative"
+    );
 
     let now = env.ledger().timestamp();
 
@@ -439,7 +450,10 @@ pub fn increase_rate_per_second(
 
     // Emit RateIncreased event.
     env.events().publish(
-        (soroban_sdk::symbol_short!("stream"), soroban_sdk::symbol_short!("rateincr")),
+        (
+            soroban_sdk::symbol_short!("stream"),
+            soroban_sdk::symbol_short!("rateincr"),
+        ),
         (stream_id, sender, new_rate, additional_deposit),
     );
 
@@ -474,7 +488,10 @@ pub fn top_up(
 
     assert!(!stream.cancelled, "stream is cancelled");
     assert_eq!(stream.sender, *sender, "caller is not the stream sender");
-    assert!(additional_deposit > 0, "additional_deposit must be greater than zero");
+    assert!(
+        additional_deposit > 0,
+        "additional_deposit must be greater than zero"
+    );
 
     let now = env.ledger().timestamp();
 
@@ -493,7 +510,10 @@ pub fn top_up(
 
     // Emit TopUp event.
     env.events().publish(
-        (soroban_sdk::symbol_short!("stream"), soroban_sdk::symbol_short!("topup")),
+        (
+            soroban_sdk::symbol_short!("stream"),
+            soroban_sdk::symbol_short!("topup"),
+        ),
         (stream_id, sender, additional_deposit),
     );
 }
@@ -505,7 +525,10 @@ pub fn top_up(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Env,
+    };
 
     fn make_stream(env: &Env, rate: i128, deposit: i128, start: u64, end: u64) -> PaymentStream {
         PaymentStream {
@@ -634,62 +657,70 @@ mod tests {
     fn on_chain_decrease_rate_returns_correct_surplus() {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(30);
+        let contract_id = env.register(crate::EscrowContract, ());
+        env.clone().as_contract(&contract_id, || {
+            env.ledger().set_timestamp(30);
 
-        let sender = Address::generate(&env);
-        let stream = PaymentStream {
-            sender: sender.clone(),
-            recipient: Address::generate(&env),
-            rate_per_second: 10,
-            deposit: 1000,
-            accrued_at_checkpoint: 0,
-            last_checkpoint_at: 0,
-            end_time: 100,
-            cancelled: false,
-            withdrawn_amount: 0,
-        };
-        let key = StreamKey::Stream(1);
-        env.storage().persistent().set(&key, &stream);
+            let sender = Address::generate(&env);
+            let stream = PaymentStream {
+                sender: sender.clone(),
+                recipient: Address::generate(&env),
+                rate_per_second: 10,
+                deposit: 1000,
+                accrued_at_checkpoint: 0,
+                last_checkpoint_at: 0,
+                end_time: 100,
+                cancelled: false,
+                withdrawn_amount: 0,
+            };
+            let key = StreamKey::Stream(1);
+            env.storage().persistent().set(&key, &stream);
 
-        // At t=30: accrued=300, remaining=700, remaining_time=70, new_rate=5
-        // consumable=350, surplus=350
-        let surplus = decrease_rate_per_second(&env, 1, &sender, 5);
-        assert_eq!(surplus, 350);
+            // At t=30: accrued=300, remaining=700, remaining_time=70, new_rate=5
+            // consumable=350, surplus=350
+            let surplus = decrease_rate_per_second(&env, 1, &sender, 5);
+            assert_eq!(surplus, 350);
 
-        let updated: PaymentStream = env.storage().persistent().get(&key).unwrap();
-        assert_eq!(updated.rate_per_second, 5);
-        assert_eq!(updated.accrued_at_checkpoint, 300);
-        assert_eq!(updated.deposit, 650); // 1000 - 350
+            let updated: PaymentStream = env.storage().persistent().get(&key).unwrap();
+            assert_eq!(updated.rate_per_second, 5);
+            assert_eq!(updated.accrued_at_checkpoint, 300);
+            assert_eq!(updated.deposit, 650); // 1000 - 350
+        });
     }
 
     #[test]
     fn on_chain_get_accrued_returns_live_value_before_and_after_rate_change() {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(20);
+        let contract_id = env.register(crate::EscrowContract, ());
+        env.clone().as_contract(&contract_id, || {
+            env.ledger().set_timestamp(20);
 
-        let sender = Address::generate(&env);
-        let stream = PaymentStream {
-            sender: sender.clone(),
-            recipient: Address::generate(&env),
-            rate_per_second: 10,
-            deposit: 1000,
-            accrued_at_checkpoint: 0,
-            last_checkpoint_at: 0,
-            end_time: 100,
-            cancelled: false,
-            withdrawn_amount: 0,
-        };
-        env.storage().persistent().set(&StreamKey::Stream(2), &stream);
+            let sender = Address::generate(&env);
+            let stream = PaymentStream {
+                sender: sender.clone(),
+                recipient: Address::generate(&env),
+                rate_per_second: 10,
+                deposit: 1000,
+                accrued_at_checkpoint: 0,
+                last_checkpoint_at: 0,
+                end_time: 100,
+                cancelled: false,
+                withdrawn_amount: 0,
+            };
+            env.storage()
+                .persistent()
+                .set(&StreamKey::Stream(2), &stream);
 
-        // Before rate change: t=20 → accrued = 20*10 = 200
-        assert_eq!(get_accrued_amount_on_chain(&env, 2), 200);
+            // Before rate change: t=20 → accrued = 20*10 = 200
+            assert_eq!(get_accrued_amount_on_chain(&env, 2), 200);
 
-        // Decrease rate
-        decrease_rate_per_second(&env, 2, &sender, 5);
+            // Decrease rate
+            decrease_rate_per_second(&env, 2, &sender, 5);
 
-        // After checkpoint at t=20 with new rate=5, get_accrued at t=20 = 200
-        assert_eq!(get_accrued_amount_on_chain(&env, 2), 200);
+            // After checkpoint at t=20 with new rate=5, get_accrued at t=20 = 200
+            assert_eq!(get_accrued_amount_on_chain(&env, 2), 200);
+        });
     }
 
     // ── create_stream (issue #969) ────────────────────────────────────────────
@@ -698,18 +729,21 @@ mod tests {
     fn create_stream_allocates_id_and_persists() {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(100);
+        let contract_id = env.register(crate::EscrowContract, ());
+        env.clone().as_contract(&contract_id, || {
+            env.ledger().set_timestamp(100);
 
-        let sender = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token = Address::generate(&env);
+            let sender = Address::generate(&env);
+            let recipient = Address::generate(&env);
+            let token = Address::generate(&env);
 
-        let stream_id = allocate_stream_id(&env);
-        assert_eq!(stream_id, 1);
+            let stream_id = allocate_stream_id(&env);
+            assert_eq!(stream_id, 1);
 
-        // Second allocation should return 2.
-        let stream_id2 = allocate_stream_id(&env);
-        assert_eq!(stream_id2, 2);
+            // Second allocation should return 2.
+            let stream_id2 = allocate_stream_id(&env);
+            assert_eq!(stream_id2, 2);
+        });
     }
 
     #[test]
@@ -791,30 +825,39 @@ mod tests {
     fn withdraw_computes_delta_correctly() {
         let env = Env::default();
         env.mock_all_auths();
-        env.ledger().set_timestamp(0);
+        let contract_id = env.register(crate::EscrowContract, ());
+        env.clone().as_contract(&contract_id, || {
+            env.ledger().set_timestamp(0);
 
-        let sender = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let token = Address::generate(&env);
-        let stream = PaymentStream {
-            sender: sender.clone(),
-            recipient: recipient.clone(),
-            rate_per_second: 10,
-            deposit: 1000,
-            accrued_at_checkpoint: 0,
-            last_checkpoint_at: 0,
-            end_time: 100,
-            cancelled: false,
-            withdrawn_amount: 0,
-        };
-        env.storage().persistent().set(&StreamKey::Stream(10), &stream);
+            let sender = Address::generate(&env);
+            let recipient = Address::generate(&env);
+            let token = Address::generate(&env);
+            let stream = PaymentStream {
+                sender: sender.clone(),
+                recipient: recipient.clone(),
+                rate_per_second: 10,
+                deposit: 1000,
+                accrued_at_checkpoint: 0,
+                last_checkpoint_at: 0,
+                end_time: 100,
+                cancelled: false,
+                withdrawn_amount: 0,
+            };
+            env.storage()
+                .persistent()
+                .set(&StreamKey::Stream(10), &stream);
 
-        // At t=30: accrued = 30*10 = 300, withdrawn = 0 → delta = 300
-        env.ledger().set_timestamp(30);
-        // Can't call withdraw without a real token contract, but we can
-        // verify the math in the stream state.
-        let retrieved: PaymentStream = env.storage().persistent().get(&StreamKey::Stream(10)).unwrap();
-        assert_eq!(get_accrued_amount(&retrieved, 30), 300);
+            // At t=30: accrued = 30*10 = 300, withdrawn = 0 → delta = 300
+            env.ledger().set_timestamp(30);
+            // Can't call withdraw without a real token contract, but we can
+            // verify the math in the stream state.
+            let retrieved: PaymentStream = env
+                .storage()
+                .persistent()
+                .get(&StreamKey::Stream(10))
+                .unwrap();
+            assert_eq!(get_accrued_amount(&retrieved, 30), 300);
+        });
     }
 
     #[test]

@@ -1,0 +1,10 @@
+[package]
+name = "contract-test-utils"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Shared test fixtures for the `contracts/` workspace (SDK =22.0.0). Use as a
+# dev-dependency only; it is never built into a deployable WASM.
+[dependencies]
+soroban-sdk = { version = "=22.0.0", features = ["testutils"] }
