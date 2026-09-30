@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { runMigrations } = require('../db/migrationRunner');
+const { runMigrations, getPendingFiles } = require('../db/migrationRunner');
 
 describe('migration runner failure recovery', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'migrations-'));
@@ -38,5 +38,20 @@ describe('migration runner failure recovery', () => {
     expect(applied.rows.map(({ name }) => name)).toEqual([
       '001_first.sql', '002_broken.sql', '003_last.sql',
     ]);
+  });
+
+  it('orders migrations with a shared numeric prefix by full filename', () => {
+    const duplicatePrefixDir = fs.mkdtempSync(path.join(os.tmpdir(), 'duplicate-prefix-migrations-'));
+    try {
+      fs.writeFileSync(path.join(duplicatePrefixDir, '002_zeta.sql'), '');
+      fs.writeFileSync(path.join(duplicatePrefixDir, '002_alpha.sql'), '');
+
+      expect(getPendingFiles(new Set(), duplicatePrefixDir)).toEqual([
+        '002_alpha.sql',
+        '002_zeta.sql',
+      ]);
+    } finally {
+      fs.rmSync(duplicatePrefixDir, { recursive: true });
+    }
   });
 });
