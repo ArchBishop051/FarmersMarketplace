@@ -23,8 +23,13 @@ const { notFoundHandler } = require('./middleware/error');
 const { sanitizeResponse } = require('./middleware/sanitize');
 const requestLogger = require('./middleware/requestLogger');
 const categoriesRouter = require('./routes/categories');
+const db = require('./db/schema');
 
 const app = express();
+
+app.use((req, res, next) => {
+  Promise.resolve(db.ready).then(() => next(), next);
+});
 
 // Configure proxy trust based on environment
 // In production, set TRUST_PROXY to the number of proxies or 'true' for all
@@ -103,12 +108,12 @@ app.use(require('./routes'));
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Start background jobs (skip in test to avoid open handles)
-if (process.env.NODE_ENV !== 'test') {
+app.locals.startBackgroundJobs = () => {
+  if (process.env.NODE_ENV === 'test') return;
   const { startActivityMonitor } = require('./jobs/activityMonitor');
   startActivityMonitor();
   const { startOrphanedUploadsCleanupJob } = require('./jobs/reconcileOrphanedUploads');
   startOrphanedUploadsCleanupJob();
-}
+};
 
 module.exports = app;
