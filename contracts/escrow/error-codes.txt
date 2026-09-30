@@ -1,0 +1,27 @@
+# EscrowError discriminant history — append-only.
+# Every code ever assigned to an EscrowError variant, as "<code> <VariantName>".
+# NEVER delete or renumber a line, even after removing a variant; codes are
+# part of the on-chain ABI and must never be reused.
+# Enforced by contracts/scripts/check-escrow-error-codes.sh (CI).
+1 NotFound
+2 AlreadySettled
+3 InDispute
+4 Unauthorized
+5 InvalidAmount
+6 AlreadyExists
+7 TimeoutNotReached
+8 InvalidWasmHash
+9 NoPendingAdmin
+10 InvalidToken
+11 MigrationFailed
+12 NotEnoughSignatures
+13 CoopNotConfigured
+14 AlreadyInitialized
+15 NotAdmin
+16 BelowMinDeposit
+17 BatchTooLarge
+18 SnapshotNotFound
+19 NotYetReleasable
+20 SubmissionWindowClosed
+21 AutoReleaseNotReached
+22 TooManyCoopSigners

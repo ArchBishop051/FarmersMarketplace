@@ -6,8 +6,8 @@ const requireAdmin = require('../middleware/requireAdmin');
 const { sendPayment } = require('../utils/stellar');
 
 // GET /api/admin/returns - list all return requests
-router.get('/returns', adminAuth, (req, res) => {
-  const returns = db.prepare(`
+router.get('/returns', adminAuth, async (req, res) => {
+  const { rows: returns } = await db.query(`
     SELECT r.*, o.total_price, o.shipping_cost, o.stellar_tx_hash AS order_tx_hash,
            p.name AS product_name,
            b.name AS buyer_name, b.email AS buyer_email
@@ -16,13 +16,13 @@ router.get('/returns', adminAuth, (req, res) => {
     JOIN products p ON o.product_id = p.id
     JOIN users b ON r.buyer_id = b.id
     ORDER BY r.created_at DESC
-  `).all();
+  `);
   res.json(returns);
 });
 
 // POST /api/admin/returns/:id/approve
 router.post('/returns/:id/approve', adminAuth, async (req, res) => {
-  const ret = db.prepare(`
+  const ret = (await db.query(`
     SELECT r.*,
            o.total_price, o.shipping_cost,
            b.stellar_public_key AS buyer_wallet,
@@ -32,8 +32,8 @@ router.post('/returns/:id/approve', adminAuth, async (req, res) => {
     JOIN users b ON r.buyer_id = b.id
     JOIN products p ON o.product_id = p.id
     JOIN users f ON p.farmer_id = f.id
-    WHERE r.id = ?
-  `).get(req.params.id);
+    WHERE r.id = $1
+  `, [req.params.id])).rows[0];
 
   if (!ret) return res.status(404).json({ error: 'Return request not found' });
   if (ret.status !== 'pending') return res.status(400).json({ error: `Return already ${ret.status}` });
@@ -48,8 +48,11 @@ router.post('/returns/:id/approve', adminAuth, async (req, res) => {
       memo: `Refund#${ret.id}`,
     });
 
-    db.prepare('UPDATE returns SET status = ?, refund_tx_hash = ? WHERE id = ?')
-      .run('approved', txHash, ret.id);
+    await db.query('UPDATE returns SET status = $1, refund_tx_hash = $2 WHERE id = $3', [
+      'approved',
+      txHash,
+      ret.id,
+    ]);
 
     res.json({ message: 'Return approved and refund issued', refundAmount, txHash });
   } catch (err) {
@@ -58,12 +61,12 @@ router.post('/returns/:id/approve', adminAuth, async (req, res) => {
 });
 
 // POST /api/admin/returns/:id/reject
-router.post('/returns/:id/reject', adminAuth, (req, res) => {
-  const ret = db.prepare('SELECT * FROM returns WHERE id = ?').get(req.params.id);
+router.post('/returns/:id/reject', adminAuth, async (req, res) => {
+  const ret = (await db.query('SELECT * FROM returns WHERE id = $1', [req.params.id])).rows[0];
   if (!ret) return res.status(404).json({ error: 'Return request not found' });
   if (ret.status !== 'pending') return res.status(400).json({ error: `Return already ${ret.status}` });
 
-  db.prepare('UPDATE returns SET status = ? WHERE id = ?').run('rejected', ret.id);
+  await db.query('UPDATE returns SET status = $1 WHERE id = $2', ['rejected', ret.id]);
   res.json({ message: 'Return request rejected' });
 });
 
@@ -124,19 +127,19 @@ router.get('/users', adminAuth, async (req, res) => {
 });
 
 // GET /api/admin/orders - list orders with pagination
-router.get('/orders', adminAuth, (req, res) => {
+router.get('/orders', adminAuth, async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
   
   const offset = (page - 1) * limit;
   
   // Get total count
-  const countResult = db.prepare('SELECT COUNT(*) as count FROM orders').get();
-  const total = countResult.count;
+  const countResult = (await db.query('SELECT COUNT(*) as count FROM orders')).rows[0];
+  const total = Number(countResult.count);
   const pages = Math.ceil(total / limit);
   
   // Get paginated data
-  const orders = db.prepare(`
+  const { rows: orders } = await db.query(`
     SELECT 
       o.id, 
       o.buyer_id, 
@@ -151,8 +154,8 @@ router.get('/orders', adminAuth, (req, res) => {
     JOIN users b ON o.buyer_id = b.id
     JOIN products p ON o.product_id = p.id
     ORDER BY o.created_at DESC
-    LIMIT ? OFFSET ?
-  `).all(limit, offset);
+    LIMIT $1 OFFSET $2
+  `, [limit, offset]);
   
   res.json({
     data: orders,
@@ -166,23 +169,26 @@ router.get('/orders', adminAuth, (req, res) => {
 });
 
 // DELETE /api/admin/users/:id - deactivate user
-router.delete('/users/:id', adminAuth, (req, res) => {
+router.delete('/users/:id', adminAuth, async (req, res) => {
   const userId = req.params.id;
   
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  const user = (await db.query('SELECT * FROM users WHERE id = $1', [userId])).rows[0];
   if (!user) return res.status(404).json({ error: 'User not found' });
   
-  db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(userId);
+  await db.query('UPDATE users SET active = 0 WHERE id = $1', [userId]);
   
   res.json({ message: 'User deactivated successfully' });
 });
 
 // GET /api/admin/stats - dashboard statistics
-router.get('/stats', adminAuth, (req, res) => {
-  const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-  const totalProducts = db.prepare('SELECT COUNT(*) as count FROM products').get().count;
-  const totalOrders = db.prepare('SELECT COUNT(*) as count FROM orders').get().count;
-  const totalRevenue = db.prepare('SELECT COALESCE(SUM(total_price), 0) as total FROM orders WHERE status = ?').get('paid').total;
+router.get('/stats', adminAuth, async (req, res) => {
+  const count = async (sql, params) => Number((await db.query(sql, params)).rows[0].count);
+  const totalUsers = await count('SELECT COUNT(*) as count FROM users');
+  const totalProducts = await count('SELECT COUNT(*) as count FROM products');
+  const totalOrders = await count('SELECT COUNT(*) as count FROM orders');
+  const totalRevenue = (
+    await db.query("SELECT COALESCE(SUM(total_price), 0) as total FROM orders WHERE status = $1", ['paid'])
+  ).rows[0].total;
   
   res.json({
     totalUsers,
@@ -193,8 +199,9 @@ router.get('/stats', adminAuth, (req, res) => {
 });
 
 // GET /api/admin/analytics/summary - last-30-day platform metrics
-router.get('/analytics/summary', adminAuth, (req, res) => {
-  const gmv = db.prepare(`
+router.get('/analytics/summary', adminAuth, async (req, res) => {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+  const gmv = (await db.query(`
     SELECT
       ROUND(SUM(total_price), 7)                                             AS total,
       ROUND(SUM(total_price - COALESCE(shipping_cost, 0)), 7)                AS product,
@@ -202,19 +209,19 @@ router.get('/analytics/summary', adminAuth, (req, res) => {
       COUNT(*)                                                                AS paid_orders
     FROM orders
     WHERE status = 'paid'
-      AND created_at >= datetime('now', '-30 days')
-  `).get();
+      AND created_at >= $1
+  `, [since])).rows[0];
 
-  const conversion = db.prepare(`
+  const conversion = (await db.query(`
     SELECT
       COUNT(*)                                                                              AS total_orders,
       SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END)                                    AS paid_orders,
       ROUND(100.0 * SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) / COUNT(*), 2)       AS rate_pct
     FROM orders
-    WHERE created_at >= datetime('now', '-30 days')
-  `).get();
+    WHERE created_at >= $1
+  `, [since])).rows[0];
 
-  const topProducts = db.prepare(`
+  const { rows: topProducts } = await db.query(`
     SELECT p.id, p.name, u.name AS farmer_name,
            SUM(o.quantity)                                                   AS units_sold,
            ROUND(SUM(o.total_price - COALESCE(o.shipping_cost, 0)), 7)      AS revenue
@@ -222,37 +229,37 @@ router.get('/analytics/summary', adminAuth, (req, res) => {
     JOIN products p ON o.product_id = p.id
     JOIN users u ON p.farmer_id = u.id
     WHERE o.status = 'paid'
-      AND o.created_at >= datetime('now', '-30 days')
-    GROUP BY p.id
+      AND o.created_at >= $1
+    GROUP BY p.id, p.name, u.name
     ORDER BY revenue DESC
     LIMIT 5
-  `).all();
+  `, [since]);
 
   // Daily active users: distinct buyers + farmers touched by orders each day
-  const dailyActiveUsers = db.prepare(`
+  const { rows: dailyActiveUsers } = await db.query(`
     SELECT day, COUNT(DISTINCT user_id) AS active_users
     FROM (
-      SELECT date(o.created_at) AS day, o.buyer_id AS user_id
+      SELECT CAST(o.created_at AS DATE) AS day, o.buyer_id AS user_id
       FROM orders o
-      WHERE o.created_at >= datetime('now', '-30 days')
+      WHERE o.created_at >= $1
       UNION ALL
-      SELECT date(o.created_at) AS day, p.farmer_id AS user_id
+      SELECT CAST(o.created_at AS DATE) AS day, p.farmer_id AS user_id
       FROM orders o
       JOIN products p ON o.product_id = p.id
-      WHERE o.created_at >= datetime('now', '-30 days')
-    )
+      WHERE o.created_at >= $1
+    ) t
     GROUP BY day
     ORDER BY day ASC
-  `).all();
+  `, [since]);
 
-  const dailyGmv = db.prepare(`
-    SELECT date(created_at) AS day, ROUND(SUM(total_price), 7) AS gmv, COUNT(*) AS orders
+  const { rows: dailyGmv } = await db.query(`
+    SELECT CAST(created_at AS DATE) AS day, ROUND(SUM(total_price), 7) AS gmv, COUNT(*) AS orders
     FROM orders
     WHERE status = 'paid'
-      AND created_at >= datetime('now', '-30 days')
-    GROUP BY date(created_at)
+      AND created_at >= $1
+    GROUP BY CAST(created_at AS DATE)
     ORDER BY day ASC
-  `).all();
+  `, [since]);
 
   res.json({
     period: 'last_30_days',
@@ -265,8 +272,8 @@ router.get('/analytics/summary', adminAuth, (req, res) => {
 });
 
 // GET /api/admin/failed-emails
-router.get('/failed-emails', adminAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM failed_emails ORDER BY created_at DESC').all();
+router.get('/failed-emails', adminAuth, async (req, res) => {
+  const { rows } = await db.query('SELECT * FROM failed_emails ORDER BY created_at DESC');
   res.json({ success: true, data: rows });
 });
 

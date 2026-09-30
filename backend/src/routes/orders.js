@@ -195,17 +195,30 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
   }
 
   let orderIds = [];
-  try {
+  const runBundleTransaction = async (work) => {
+    if (typeof db.withTransaction === 'function') return db.withTransaction(work);
+
     await db.query('BEGIN');
-    // Lock rows to prevent race conditions
+    try {
+      const result = await work(db);
+      await db.query('COMMIT');
+      return result;
+    } catch (error) {
+      await db.query('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const executeBundleTransaction = async (tx) => {
     const productIds = bundleItems.map((i) => i.product_id);
     const placeholders = productIds.map((_, i) => `$${i + 1}`).join(',');
-    const { rows: lockedProducts } = await db.query(
-      `SELECT id, name, quantity FROM products WHERE id IN (${placeholders}) FOR UPDATE`,
+    const lockClause = db.isPostgres ? ' FOR UPDATE' : '';
+    const { rows: lockedProducts } = await tx.query(
+      `SELECT id, name, quantity FROM products WHERE id IN (${placeholders}) ORDER BY id${lockClause}`,
       productIds
     );
     const stockMap = {};
-    for (const p of lockedProducts) stockMap[p.id] = p;
+    for (const product of lockedProducts) stockMap[product.id] = product;
 
     const outOfStock = [];
     for (const item of bundleItems) {
@@ -213,26 +226,32 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
       if (!stock || stock.quantity < item.quantity)
         outOfStock.push({ product_id: item.product_id, product_name: item.product_name, available: stock?.quantity ?? 0, required: item.quantity });
     }
-    if (outOfStock.length > 0) {
-      await db.query('ROLLBACK');
-      return res.status(409).json({ success: false, code: 'insufficient_stock', outOfStock });
-    }
+    if (outOfStock.length > 0) return { outOfStock, orderIds: [] };
 
+    const createdOrderIds = [];
     for (const item of bundleItems) {
-      await db.query('UPDATE products SET quantity = quantity - $1 WHERE id = $2', [item.quantity, item.product_id]);
+      await tx.query('UPDATE products SET quantity = quantity - $1 WHERE id = $2', [item.quantity, item.product_id]);
     }
     for (const item of bundleItems) {
       const itemPrice = (item.product_price * item.quantity) / individualTotal * bundle.price;
-      const { rows: orderRows } = await db.query(
+      const { rows: orderRows } = await tx.query(
         `INSERT INTO orders (buyer_id, product_id, quantity, total_price, status, address_id, bundle_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
         [req.user.id, item.product_id, item.quantity, itemPrice, 'pending', address_id || null, bundle_id]
       );
-      orderIds.push(orderRows[0].id);
+      createdOrderIds.push(orderRows[0].id);
     }
-    await db.query('COMMIT');
+    return { outOfStock: [], orderIds: createdOrderIds };
+  };
+
+  try {
+    const result = await runBundleTransaction(executeBundleTransaction);
+    orderIds = result.orderIds;
+    const { outOfStock } = result;
+    if (outOfStock.length > 0) {
+      return res.status(409).json({ success: false, code: 'insufficient_stock', outOfStock });
+    }
   } catch (e) {
-    await db.query('ROLLBACK');
     return err(res, 400, e.message || 'Failed to process bundle order', 'bundle_order_failed');
   }
 
@@ -273,14 +292,14 @@ async function handleBundleOrder(req, res, bundle_id, address_id, coupon_code, u
 
     return res.json(responseData);
   } catch (e) {
-    await db.query('BEGIN');
-    for (const orderId of orderIds) {
-      await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
-    }
-    for (const item of bundleItems) {
-      await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
-    }
-    await db.query('COMMIT');
+    await runBundleTransaction(async (tx) => {
+      for (const orderId of orderIds) {
+        await tx.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
+      }
+      for (const item of bundleItems) {
+        await tx.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
+      }
+    });
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderIds };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -673,8 +692,9 @@ router.post('/', auth, requireEmailVerified, orderRateLimit, validate.order, asy
     await db.query('UPDATE orders SET status = $1 WHERE id = $2', ['failed', orderId]);
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product_id]);
 
-    if (error.code === 'account_not_found') {
+    if (e.code === 'account_not_found') {
       return res.status(402).json({ success: false, message: 'Please fund your wallet before purchasing', code: 'unfunded_account', orderId });
+    }
     const errorData = { success: false, message: 'Payment failed: ' + e.message, code: 'payment_failed', orderId };
     if (idempotencyKey) await cacheResponse(idempotencyKey, { ...errorData, _status: 402 });
     return res.status(402).json(errorData);
@@ -795,13 +815,29 @@ router.patch('/:id/status', auth, validate.updateOrderStatus, async (req, res) =
   const order = rows[0];
   if (!order) return err(res, 404, 'Order not found or not yours', 'not_found');
 
+  const allowedNextStatuses = {
+    paid: ['processing'],
+    processing: ['shipped'],
+    shipped: ['delivered'],
+  };
+  if (!allowedNextStatuses[order.status]?.includes(status)) {
+    return err(res, 409, `Cannot change order status from ${order.status} to ${status}`, 'invalid_status_transition');
+  }
+
+  let updateResult;
   if (status === 'delivered') {
-    await db.query(
-      'UPDATE orders SET status = $1, delivered_at = $2 WHERE id = $3',
-      [status, new Date().toISOString(), order.id]
+    updateResult = await db.query(
+      'UPDATE orders SET status = $1, delivered_at = $2 WHERE id = $3 AND status = $4',
+      [status, new Date().toISOString(), order.id, order.status]
     );
   } else {
-    await db.query('UPDATE orders SET status = $1 WHERE id = $2', [status, order.id]);
+    updateResult = await db.query(
+      'UPDATE orders SET status = $1 WHERE id = $2 AND status = $3',
+      [status, order.id, order.status]
+    );
+  }
+  if (updateResult.rowCount === 0) {
+    return err(res, 409, 'Order status changed before the update could be applied', 'invalid_status_transition');
   }
 
   if (status === 'completed' && order.buyer_stellar_address) {

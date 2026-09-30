@@ -143,6 +143,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check EscrowError codes (NEXT_CODE, no reuse, README table)
+        run: bash scripts/check-escrow-error-codes.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -174,6 +177,100 @@ jobs:
           name: contracts-wasm-size-profile
           path: contracts/contracts-wasm-profile.txt
           retention-days: 30
+
+  contracts:
+    name: Contracts (fmt, clippy, test, wasm)
+    # Runs on every PR and push to main so non-compiling contract code can't land (#1286).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # SDK =22.0.0 workspace
+          - name: contracts-workspace
+            dir: contracts
+            sdk: sdk22
+            wasm: soroban_escrow creator_earnings
+          # Legacy SDK =21.x crates, each with its own manifest
+          - name: contract-escrow
+            dir: contract
+            sdk: sdk21
+            wasm: escrow
+          - name: contract-reward-token
+            dir: contract/reward-token
+            sdk: sdk21
+            wasm: reward_token
+          - name: contract-carbon-offset
+            dir: contract/carbon-offset
+            sdk: sdk21
+            wasm: carbon_offset
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.dir }}/target
+          key: ${{ runner.os }}-cargo-${{ matrix.sdk }}-${{ matrix.name }}-${{ hashFiles(format('{0}/**/Cargo.toml', matrix.dir), format('{0}/**/Cargo.lock', matrix.dir)) }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.sdk }}-${{ matrix.name }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: Build release WASM
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Collect WASM artifacts
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/wasm-out"
+          for w in ${{ matrix.wasm }}; do
+            cp "target/wasm32-unknown-unknown/release/$w.wasm" "$GITHUB_WORKSPACE/wasm-out/"
+          done
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-${{ matrix.name }}
+          path: wasm-out/*.wasm
+          retention-days: 30
+
+      - name: Check escrow error codes
+        if: matrix.name == 'contracts-workspace'
+        working-directory: .
+        run: bash contracts/scripts/check-escrow-error-codes.sh
+
+      - name: Check WASM hashes against registry
+        # Needs the deployment registry DB; skipped (with a notice) when the secret is unavailable, e.g. on fork PRs.
+        if: matrix.name == 'contracts-workspace'
+        working-directory: .
+        env:
+          DATABASE_URL: ${{ secrets.CONTRACTS_REGISTRY_DATABASE_URL }}
+        run: |
+          if [ -z "${DATABASE_URL}" ]; then
+            echo "::notice::CONTRACTS_REGISTRY_DATABASE_URL not set; skipping check-wasm-hashes.sh"
+            exit 0
+          fi
+          sudo apt-get install -y postgresql-client >/dev/null
+          bash contracts/scripts/check-wasm-hashes.sh
 
   contract-tests-nightly:
     name: Contract Tests (nightly, Docker)

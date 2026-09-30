@@ -59,33 +59,6 @@ const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
 const { sanitizeText } = require('../utils/sanitize');
 
-// Schema migration for categories
-async function ensureCategorySchema() {
-  const createSql = `
-    CREATE TABLE IF NOT EXISTS categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      slug TEXT UNIQUE NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `;
-  const alterSql = `ALTER TABLE products ADD COLUMN category_id INTEGER REFERENCES categories(id)`;
-
-  try {
-    if (typeof db.exec === 'function') {
-      await db.exec(createSql);
-      await db.exec(alterSql);
-    } else if (typeof db.query === 'function') {
-      await db.query(createSql);
-      await db.query(alterSql);
-    }
-  } catch {
-    // Ignore migration failures during test/bootstrap; route handlers will still work.
-  }
-}
-
-void ensureCategorySchema();
-
 function toSlug(name) {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
