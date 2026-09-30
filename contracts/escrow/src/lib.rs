@@ -1774,6 +1774,16 @@ impl EscrowContract {
     /// list.  Pass an empty `Bytes` for members that are not signing; pass a
     /// 64-byte ed25519 signature for members that are.  Any non-empty entry
     /// that is not a valid 64-byte signature will cause the call to fail.
+    ///
+    /// # Signer set (#1242)
+    /// Signatures are validated against the **current** `CoopConfig` read at
+    /// release time, not a snapshot taken at deposit time (escrows do not
+    /// record a signer set). A signer removed via `set_coop` after deposit can
+    /// no longer authorize a release, and a signer added after deposit can.
+    /// This is safe because `set_coop` is gated on-chain by the contract admin's
+    /// `require_auth`, independent of any backend membership checks: a
+    /// cooperative member cannot rotate signers without the admin key, so
+    /// the backend's authorization model never widens who can release funds.
     pub fn multisig_release(
         env: Env,
         order_id: u64,
@@ -1830,6 +1840,11 @@ impl EscrowContract {
             return Err(EscrowError::NotEnoughSignatures);
         }
 
+        // #1240 — Soroban invocations are atomic: if this transfer fails (token
+        // paused/frozen, insufficient contract balance) the whole invocation
+        // reverts, so no status/balance write in this contract is committed.
+        // The same guarantee covers every other token transfer in this file
+        // (release, refund, stream withdraw/cancel).
         let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -3008,6 +3023,110 @@ mod test {
 
             let result = EscrowContract::multisig_release(env, 604, sigs);
             assert_eq!(result, Err(EscrowError::NotEnoughSignatures));
+        });
+    }
+
+    // ── #1242 signer set changed between deposit and release ─────────────────
+
+    fn coop_signature(env: &Env, key: &ed25519_dalek::SigningKey, order_id: u64) -> Bytes {
+        use ed25519_dalek::Signer;
+        let order_id_bytes = Bytes::from_slice(env, &order_id.to_be_bytes());
+        let message: BytesN<32> = env.crypto().sha256(&order_id_bytes).into();
+        Bytes::from_slice(env, &key.sign(&message.to_array()).to_bytes())
+    }
+
+    fn coop_member(env: &Env, key: &ed25519_dalek::SigningKey) -> BytesN<32> {
+        BytesN::from_array(env, &key.verifying_key().to_bytes())
+    }
+
+    fn deposit_then_rotate_signers(
+        env: &Env,
+        old_key: &ed25519_dalek::SigningKey,
+        new_key: &ed25519_dalek::SigningKey,
+        order_id: u64,
+    ) {
+        setup_admin(env);
+        let mut old_members: Vec<BytesN<32>> = Vec::new(env);
+        old_members.push_back(coop_member(env, old_key));
+        EscrowContract::set_coop(env.clone(), old_members, 1).unwrap();
+
+        let token = env.register(NoopTokenContract, ());
+        store_escrow(env, order_id, Address::generate(env), Address::generate(env), token);
+
+        let mut new_members: Vec<BytesN<32>> = Vec::new(env);
+        new_members.push_back(coop_member(env, new_key));
+        EscrowContract::set_coop(env.clone(), new_members, 1).unwrap();
+    }
+
+    #[test]
+    fn multisig_release_accepts_signer_added_after_deposit() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        let old_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let new_key = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        env.clone().as_contract(&contract_id, || {
+            deposit_then_rotate_signers(&env, &old_key, &new_key, 1242);
+
+            let mut sigs: Vec<Bytes> = Vec::new(&env);
+            sigs.push_back(coop_signature(&env, &new_key, 1242));
+            EscrowContract::multisig_release(env.clone(), 1242, sigs).unwrap();
+
+            let escrow: Escrow = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(1242))
+                .unwrap();
+            assert_eq!(escrow.status, EscrowStatus::Released);
+        });
+    }
+
+    // ── #1240 failed token transfer does not commit escrow state ─────────────
+
+    #[test]
+    fn multisig_release_failed_transfer_leaves_escrow_active() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(EscrowContract, ());
+        // Real SAC; the escrow contract holds 0 tokens, so the payout transfer fails.
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        env.as_contract(&contract_id, || {
+            let config = CoopConfig { members: Vec::new(&env), threshold: 0 };
+            env.storage().instance().set(&DataKey::CoopConfig, &config);
+            store_escrow(&env, 1240, Address::generate(&env), Address::generate(&env), token);
+        });
+
+        let client = EscrowContractClient::new(&env, &contract_id);
+        assert!(client.try_multisig_release(&1240, &Vec::new(&env)).is_err());
+
+        env.as_contract(&contract_id, || {
+            let escrow: Escrow = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(1240))
+                .unwrap();
+            assert_eq!(escrow.status, EscrowStatus::Active);
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn multisig_release_rejects_signer_removed_after_deposit() {
+        let env = Env::default();
+        let contract_id = env.register(EscrowContract, ());
+        env.mock_all_auths();
+        let old_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let new_key = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        env.clone().as_contract(&contract_id, || {
+            deposit_then_rotate_signers(&env, &old_key, &new_key, 1243);
+
+            // The removed signer's signature is verified against the current
+            // member key and fails ed25519 verification.
+            let mut sigs: Vec<Bytes> = Vec::new(&env);
+            sigs.push_back(coop_signature(&env, &old_key, 1243));
+            let _ = EscrowContract::multisig_release(env.clone(), 1243, sigs);
         });
     }
 

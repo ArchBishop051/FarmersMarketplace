@@ -2,7 +2,10 @@
 # check-escrow-error-codes.sh
 #
 # Verifies that every EscrowError variant in contracts/escrow/src/lib.rs
-# has a matching row in the README "Error Codes" table, and vice-versa.
+# has a matching row in the README "Error Codes" table, and vice-versa, that
+# the "// NEXT_CODE: N" comment equals the highest discriminant + 1, and that
+# no discriminant is duplicated or reused against the append-only history in
+# contracts/escrow/error-codes.txt (#1238).
 #
 # Run from the repo root or from contracts/:
 #   bash contracts/scripts/check-escrow-error-codes.sh
@@ -16,21 +19,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LIB="$REPO_ROOT/contracts/escrow/src/lib.rs"
 README="$REPO_ROOT/README.md"
+HISTORY="$REPO_ROOT/contracts/escrow/error-codes.txt"
 
 # ---------------------------------------------------------------------------
 # Extract "VariantName = N" pairs from the EscrowError enum in lib.rs.
 # We grab lines between the #[repr(u32)] enum declaration and its closing '}'.
 # ---------------------------------------------------------------------------
 enum_codes() {
-  awk '
-    /^pub enum EscrowError/  { in_enum=1; next }
-    in_enum && /^\}/ { in_enum=0; next }
-    in_enum {
-      # match lines like:  SomeName = 42,
-      if (match($0, /([A-Za-z]+)[[:space:]]*=[[:space:]]*([0-9]+)/, arr))
-        print arr[2] " " arr[1]
-    }
-  ' "$LIB" | sort -n
+  # Portable (no gawk-only match(..., arr)): matches lines like  SomeName = 42,
+  sed -n '/^pub enum EscrowError/,/^}/p' "$LIB" \
+    | sed -nE 's/^[[:space:]]*([A-Za-z]+)[[:space:]]*=[[:space:]]*([0-9]+).*/\2 \1/p' \
+    | sort -n
 }
 
 # ---------------------------------------------------------------------------
@@ -44,10 +43,50 @@ readme_codes() {
 
 ENUM=$(enum_codes)
 README_TABLE=$(readme_codes)
+FAIL=0
+
+# ---------------------------------------------------------------------------
+# #1238 — NEXT_CODE comment must equal (highest discriminant + 1), no code may
+# appear twice, and no code may be reused against the append-only history in
+# contracts/escrow/error-codes.txt.
+# ---------------------------------------------------------------------------
+NEXT_CODE=$(sed -nE 's|^// NEXT_CODE:[[:space:]]*([0-9]+).*|\1|p' "$LIB" | head -n1)
+MAX_CODE=$(echo "$ENUM" | awk 'END { print $1 + 0 }')
+HISTORY_TABLE=$(grep -vE '^[[:space:]]*(#|$)' "$HISTORY" | sort -n)
+HISTORY_MAX=$(echo "$HISTORY_TABLE" | awk 'END { print $1 + 0 }')
+
+if [ -z "$NEXT_CODE" ]; then
+  echo "✗ '// NEXT_CODE: N' comment not found in $LIB"
+  FAIL=1
+elif [ "$NEXT_CODE" -ne $((MAX_CODE + 1)) ] || [ "$NEXT_CODE" -le "$HISTORY_MAX" ]; then
+  echo "✗ NEXT_CODE is $NEXT_CODE but must be $(( (MAX_CODE > HISTORY_MAX ? MAX_CODE : HISTORY_MAX) + 1 ))" \
+       "(highest enum discriminant: $MAX_CODE, highest historical code: $HISTORY_MAX)."
+  FAIL=1
+fi
+
+DUPES=$(echo "$ENUM" | awk '{ print $1 }' | uniq -d)
+if [ -n "$DUPES" ]; then
+  echo "✗ Duplicate EscrowError discriminant(s): $DUPES"
+  FAIL=1
+fi
+
+while read -r code name; do
+  [ -z "$code" ] && continue
+  prev=$(echo "$HISTORY_TABLE" | awk -v c="$code" '$1 == c { print $2 }')
+  if [ -z "$prev" ]; then
+    echo "✗ Code $code ($name) is missing from $HISTORY — append '$code $name' to it."
+    FAIL=1
+  elif [ "$prev" != "$name" ]; then
+    echo "✗ Code $code is reused: now '$name', previously '$prev'. Codes must never be reused."
+    FAIL=1
+  fi
+done <<< "$ENUM"
+
+[ "$FAIL" -eq 0 ] && echo "✓ NEXT_CODE ($NEXT_CODE) and discriminant history are consistent."
 
 if [ "$ENUM" = "$README_TABLE" ]; then
   echo "✓ EscrowError codes match README table."
-  exit 0
+  exit "$FAIL"
 fi
 
 echo "✗ EscrowError codes do not match the README 'Error Codes' table."
