@@ -4,6 +4,7 @@ const { parse } = require('csv-parse');
 const db = require('../db/schema');
 const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
+const { sanitizeText } = require('../utils/sanitize');
 
 // Configure multer for CSV upload
 const upload = multer({
@@ -91,11 +92,11 @@ router.post('/', auth, upload.single('file'), async (req, res) => {
           insertStmt.run(
             req.user.id,
             row.name.trim(),
-            row.description?.trim() || null,
+            sanitizeText(row.description?.trim()) || null,
             price,
             quantity,
-            row.unit?.trim() || 'unit',
-            row.category?.trim() || 'other'
+            sanitizeText(row.unit?.trim()) || 'unit',
+            sanitizeText(row.category?.trim()) || 'other'
           );
           results.created++;
         } catch (e) {

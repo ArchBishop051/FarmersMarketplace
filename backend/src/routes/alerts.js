@@ -101,8 +101,10 @@ async function notifyNearbyFarmers(alert) {
      LEFT JOIN products p ON p.farmer_id = u.id
      WHERE u.role = 'farmer' AND u.id != $1
        AND p.id IS NOT NULL
+       AND u.latitude IS NOT NULL AND u.longitude IS NOT NULL
+       AND ABS(u.latitude - $2) < $3 AND ABS(u.longitude - $4) < $3
      LIMIT 50`,
-    [alert.farmer_id]
+    [alert.farmer_id, alert.latitude, radiusDegrees, alert.longitude]
   );
 
   const alertTypeLabel =
@@ -148,3 +150,4 @@ router.patch('/alerts/:id/read', auth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.notifyNearbyFarmers = notifyNearbyFarmers;

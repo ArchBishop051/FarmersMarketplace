@@ -201,34 +201,32 @@ async function placeBidPostgres({ auctionId, buyerId, amount }) {
   }
 }
 
-function placeBidSqlite({ auctionId, buyerId, amount }) {
-  // SQLite transactions are synchronous and serialised — no explicit locking needed
-  let result;
-  db.transaction(() => {
-    const auction = db
-      .prepare(
-        `SELECT id, status, ends_at, start_price, current_bid, highest_bidder_id,
-                min_increment, reserve_price, farmer_id
-         FROM auctions WHERE id = ?`
-      )
-      .get(auctionId);
+async function placeBidSqlite({ auctionId, buyerId, amount }) {
+  // Single-writer SQLite: use an optimistic conditional UPDATE instead of a held transaction
+  const { rows } = await db.query(
+    `SELECT id, status, ends_at, start_price, current_bid, highest_bidder_id,
+            min_increment, reserve_price, farmer_id
+     FROM auctions WHERE id = $1`,
+    [auctionId]
+  );
+  const auction = rows[0];
 
-    const validation = validateBidRules(auction, buyerId, amount);
-    if (!validation.ok) {
-      result = validation;
-      return; // transaction body returns; better-sqlite3 will commit (no writes occurred)
-    }
+  const validation = validateBidRules(auction, buyerId, amount);
+  if (!validation.ok) return validation;
 
-    db.prepare('INSERT INTO bids (auction_id, buyer_id, amount) VALUES (?, ?, ?)').run(
-      auctionId, buyerId, amount
-    );
-    db.prepare(
-      'UPDATE auctions SET current_bid = ?, highest_bidder_id = ? WHERE id = ?'
-    ).run(amount, buyerId, auctionId);
+  const upd = await db.query(
+    `UPDATE auctions SET current_bid = $1, highest_bidder_id = $2
+     WHERE id = $3 AND COALESCE(current_bid, -1) = COALESCE($4, -1)`,
+    [amount, buyerId, auctionId, auction.current_bid]
+  );
+  if (!upd.rowCount) return fail(409, 'Bid superseded, please retry', 'bid_conflict');
 
-    result = { success: true };
-  })();
-  return result;
+  await db.query('INSERT INTO bids (auction_id, buyer_id, amount) VALUES ($1, $2, $3)', [
+    auctionId,
+    buyerId,
+    amount,
+  ]);
+  return { success: true };
 }
 
 /**
@@ -276,17 +274,18 @@ function fail(status, message, code) {
 }
 
 // GET /api/auctions/:id/bids - bid leaderboard for farmer
-router.get('/:id/bids', auth, (req, res) => {
-  const auction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(req.params.id);
+router.get('/:id/bids', auth, async (req, res) => {
+  const auction = (await db.query('SELECT * FROM auctions WHERE id = $1', [req.params.id])).rows[0];
   if (!auction) return err(res, 404, 'Auction not found', 'not_found');
   if (auction.farmer_id !== req.user.id) return err(res, 403, 'Forbidden', 'forbidden');
 
-  const bids = db.prepare(
+  const { rows: bids } = await db.query(
     `SELECT b.amount, b.created_at, u.name as bidder_name
      FROM bids b JOIN users u ON b.buyer_id = u.id
-     WHERE b.auction_id = ?
-     ORDER BY b.created_at DESC`
-  ).all(req.params.id);
+     WHERE b.auction_id = $1
+     ORDER BY b.created_at DESC`,
+    [req.params.id]
+  );
 
   // anonymise: first name + last initial
   const data = bids.map(b => {
@@ -300,13 +299,15 @@ router.get('/:id/bids', auth, (req, res) => {
 });
 
 // PATCH /api/auctions/:id/end - farmer ends auction early
-router.patch('/:id/end', auth, (req, res) => {
-  const auction = db.prepare('SELECT * FROM auctions WHERE id = ?').get(req.params.id);
+router.patch('/:id/end', auth, async (req, res) => {
+  const auction = (await db.query('SELECT * FROM auctions WHERE id = $1', [req.params.id])).rows[0];
   if (!auction) return err(res, 404, 'Auction not found', 'not_found');
   if (auction.farmer_id !== req.user.id) return err(res, 403, 'Forbidden', 'forbidden');
   if (auction.status !== 'active') return err(res, 400, 'Auction is not active', 'not_active');
 
-  db.prepare(`UPDATE auctions SET status = 'ended', ends_at = datetime('now') WHERE id = ?`).run(auction.id);
+  await db.query(`UPDATE auctions SET status = 'ended', ends_at = CURRENT_TIMESTAMP WHERE id = $1`, [
+    auction.id,
+  ]);
   res.json({ success: true });
 });
 

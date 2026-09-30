@@ -4,30 +4,47 @@ const auth = require('../middleware/auth');
 const { err } = require('../middleware/error');
 const { sendPayment, getBalance } = require('../utils/stellar');
 
+// Run fn(q) atomically on Postgres; SQLite (single writer) runs statements directly.
+async function withTx(fn) {
+  if (!db.isPostgres) return fn((sql, params) => db.query(sql, params));
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const result = await fn((sql, params) => client.query(sql, params));
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // GET /api/bundles — public listing
-router.get('/', (req, res) => {
-  const bundles = db
-    .prepare(
-      `
-    SELECT b.*, u.name as farmer_name FROM bundles b
+router.get('/', async (req, res) => {
+  const { rows: bundles } = await db.query(
+    `SELECT b.*, u.name as farmer_name FROM bundles b
     JOIN users u ON b.farmer_id = u.id
-    ORDER BY b.created_at DESC
-  `
-    )
-    .all();
+    ORDER BY b.created_at DESC`
+  );
 
-  const items = db.prepare(`
-    SELECT bi.*, p.name as product_name, p.unit, p.quantity as stock
-    FROM bundle_items bi JOIN products p ON bi.product_id = p.id
-    WHERE bi.bundle_id = ?
-  `);
-
-  const data = bundles.map((b) => ({ ...b, items: items.all(b.id) }));
+  const data = await Promise.all(
+    bundles.map(async (b) => {
+      const { rows: items } = await db.query(
+        `SELECT bi.*, p.name as product_name, p.unit, p.quantity as stock
+        FROM bundle_items bi JOIN products p ON bi.product_id = p.id
+        WHERE bi.bundle_id = $1`,
+        [b.id]
+      );
+      return { ...b, items };
+    })
+  );
   res.json({ success: true, data });
 });
 
 // POST /api/bundles — farmer creates a bundle
-router.post('/', auth, (req, res) => {
+router.post('/', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return err(res, 403, 'Only farmers can create bundles', 'forbidden');
 
@@ -49,9 +66,9 @@ router.post('/', auth, (req, res) => {
         'validation_error'
       );
     }
-    const product = db
-      .prepare('SELECT id, farmer_id FROM products WHERE id = ?')
-      .get(item.product_id);
+    const product = (
+      await db.query('SELECT id, farmer_id FROM products WHERE id = $1', [item.product_id])
+    ).rows[0];
     if (!product || product.farmer_id !== req.user.id) {
       invalidProductIds.push(item.product_id);
     }
@@ -60,31 +77,33 @@ router.post('/', auth, (req, res) => {
     return err(res, 400, `Invalid product IDs: ${invalidProductIds.join(', ')}`, 'validation_error');
   }
 
-  const create = db.transaction(() => {
-    const bundle = db
-      .prepare('INSERT INTO bundles (farmer_id, name, description, price) VALUES (?, ?, ?, ?)')
-      .run(req.user.id, name.trim(), description || null, bundlePrice);
-
-    const insertItem = db.prepare(
-      'INSERT INTO bundle_items (bundle_id, product_id, quantity) VALUES (?, ?, ?)'
+  const id = await withTx(async (q) => {
+    const { rows } = await q(
+      'INSERT INTO bundles (farmer_id, name, description, price) VALUES ($1, $2, $3, $4) RETURNING id',
+      [req.user.id, name.trim(), description || null, bundlePrice]
     );
     for (const item of items)
-      insertItem.run(bundle.lastInsertRowid, item.product_id, item.quantity);
-    return bundle.lastInsertRowid;
+      await q('INSERT INTO bundle_items (bundle_id, product_id, quantity) VALUES ($1, $2, $3)', [
+        rows[0].id,
+        item.product_id,
+        item.quantity,
+      ]);
+    return rows[0].id;
   });
-
-  const id = create();
   res.status(201).json({ success: true, id });
 });
 
 // DELETE /api/bundles/:id — farmer removes own bundle
-router.delete('/:id', auth, (req, res) => {
+router.delete('/:id', auth, async (req, res) => {
   if (req.user.role !== 'farmer') return err(res, 403, 'Farmers only', 'forbidden');
-  const bundle = db
-    .prepare('SELECT * FROM bundles WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
+  const bundle = (
+    await db.query('SELECT * FROM bundles WHERE id = $1 AND farmer_id = $2', [
+      req.params.id,
+      req.user.id,
+    ])
+  ).rows[0];
   if (!bundle) return err(res, 404, 'Bundle not found or not yours', 'not_found');
-  db.prepare('DELETE FROM bundles WHERE id = ?').run(req.params.id);
+  await db.query('DELETE FROM bundles WHERE id = $1', [req.params.id]);
   res.json({ success: true });
 });
 
@@ -96,26 +115,22 @@ router.post('/purchase', auth, async (req, res) => {
   const { bundle_id } = req.body;
   if (!bundle_id) return err(res, 400, 'bundle_id is required', 'validation_error');
 
-  const bundle = db
-    .prepare(
-      `
-    SELECT b.*, u.stellar_public_key as farmer_wallet
+  const bundle = (
+    await db.query(
+      `SELECT b.*, u.stellar_public_key as farmer_wallet
     FROM bundles b JOIN users u ON b.farmer_id = u.id
-    WHERE b.id = ?
-  `
+    WHERE b.id = $1`,
+      [bundle_id]
     )
-    .get(bundle_id);
+  ).rows[0];
   if (!bundle) return err(res, 404, 'Bundle not found', 'not_found');
 
-  const items = db
-    .prepare(
-      `
-    SELECT bi.*, p.quantity as stock, p.name as product_name
+  const { rows: items } = await db.query(
+    `SELECT bi.*, p.quantity as stock, p.name as product_name
     FROM bundle_items bi JOIN products p ON bi.product_id = p.id
-    WHERE bi.bundle_id = ?
-  `
-    )
-    .all(bundle_id);
+    WHERE bi.bundle_id = $1`,
+    [bundle_id]
+  );
 
   // Check stock for all items
   for (const item of items) {
@@ -123,7 +138,7 @@ router.post('/purchase', auth, async (req, res) => {
       return err(res, 400, `Insufficient stock for "${item.product_name}"`, 'insufficient_stock');
   }
 
-  const buyer = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const buyer = (await db.query('SELECT * FROM users WHERE id = $1', [req.user.id])).rows[0];
   const balance = await getBalance(buyer.stellar_public_key);
   if (balance < bundle.price + 0.00001)
     return res
@@ -131,24 +146,22 @@ router.post('/purchase', auth, async (req, res) => {
       .json({ success: false, message: 'Insufficient XLM balance', code: 'insufficient_balance' });
 
   // Atomically decrement stock for all items and create bundle_order record
-  const reserve = db.transaction(() => {
-    for (const item of items) {
-      const result = db
-        .prepare('UPDATE products SET quantity = quantity - ? WHERE id = ? AND quantity >= ?')
-        .run(item.quantity, item.product_id, item.quantity);
-      if (result.changes === 0) throw new Error(`Insufficient stock for "${item.product_name}"`);
-    }
-    const order = db
-      .prepare(
-        'INSERT INTO bundle_orders (buyer_id, bundle_id, total_price, status) VALUES (?, ?, ?, ?)'
-      )
-      .run(req.user.id, bundle_id, bundle.price, 'pending');
-    return order.lastInsertRowid;
-  });
-
   let orderId;
   try {
-    orderId = reserve();
+    orderId = await withTx(async (q) => {
+      for (const item of items) {
+        const result = await q(
+          'UPDATE products SET quantity = quantity - $1 WHERE id = $2 AND quantity >= $3',
+          [item.quantity, item.product_id, item.quantity]
+        );
+        if (!result.rowCount) throw new Error(`Insufficient stock for "${item.product_name}"`);
+      }
+      const { rows } = await q(
+        'INSERT INTO bundle_orders (buyer_id, bundle_id, total_price, status) VALUES ($1, $2, $3, $4) RETURNING id',
+        [req.user.id, bundle_id, bundle.price, 'pending']
+      );
+      return rows[0].id;
+    });
   } catch (e) {
     return err(res, 400, e.message, 'insufficient_stock');
   }
@@ -161,22 +174,22 @@ router.post('/purchase', auth, async (req, res) => {
       memo: `Bundle#${orderId}`,
     });
 
-    db.prepare('UPDATE bundle_orders SET status = ?, stellar_tx_hash = ? WHERE id = ?').run(
+    await db.query('UPDATE bundle_orders SET status = $1, stellar_tx_hash = $2 WHERE id = $3', [
       'paid',
       txHash,
-      orderId
-    );
+      orderId,
+    ]);
 
     res.json({ success: true, orderId, txHash, totalPrice: bundle.price });
   } catch (e) {
-    db.transaction(() => {
-      db.prepare('UPDATE bundle_orders SET status = ? WHERE id = ?').run('failed', orderId);
+    await withTx(async (q) => {
+      await q('UPDATE bundle_orders SET status = $1 WHERE id = $2', ['failed', orderId]);
       for (const item of items)
-        db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?').run(
+        await q('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [
           item.quantity,
-          item.product_id
-        );
-    })();
+          item.product_id,
+        ]);
+    });
     res
       .status(402)
       .json({
@@ -189,17 +202,14 @@ router.post('/purchase', auth, async (req, res) => {
 });
 
 // GET /api/bundles/orders — buyer's bundle order history
-router.get('/orders', auth, (req, res) => {
-  const data = db
-    .prepare(
-      `
-    SELECT bo.*, b.name as bundle_name, b.description as bundle_description
+router.get('/orders', auth, async (req, res) => {
+  const { rows: data } = await db.query(
+    `SELECT bo.*, b.name as bundle_name, b.description as bundle_description
     FROM bundle_orders bo JOIN bundles b ON bo.bundle_id = b.id
-    WHERE bo.buyer_id = ?
-    ORDER BY bo.created_at DESC
-  `
-    )
-    .all(req.user.id);
+    WHERE bo.buyer_id = $1
+    ORDER BY bo.created_at DESC`,
+    [req.user.id]
+  );
   res.json({ success: true, data });
 });
 

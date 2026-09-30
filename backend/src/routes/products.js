@@ -160,18 +160,17 @@ router.get('/allergens', (req, res) => {
 });
 
 // GET /api/products/:id
-router.get('/:id', (req, res) => {
-  const product = db.prepare(`
+router.get('/:id', async (req, res) => {
+  const product = (await db.query(`
     SELECT p.*, u.name AS farmer_name, u.stellar_public_key AS farmer_wallet
     FROM products p
     JOIN users u ON p.farmer_id = u.id
-    WHERE p.id = ?
-  `).get(req.params.id);
+    WHERE p.id = $1
+  `, [req.params.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found' });
 
   // #616 — hide product if not yet available per scheduling
-  const schedule = db.prepare('SELECT available_from FROM product_scheduling WHERE product_id = ?')
-    .get(product.id);
+  const schedule = (await db.query('SELECT available_from FROM product_scheduling WHERE product_id = $1', [product.id])).rows[0];
   if (schedule && new Date(schedule.available_from) > new Date()) {
     return res.status(404).json({
       error: 'Product not yet available',
@@ -240,19 +239,18 @@ router.post('/', auth, requireEmailVerified, validate.product, async (req, res) 
     if (new Date(available_from) >= new Date(available_until)) return err(res, 400, 'available_from must be before available_until', 'validation_error');
   }
 
-  const result = db.prepare(
-    'INSERT INTO products (farmer_id, name, description, price, quantity, unit, weight_kg) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(
-    req.user.id, name, description || '', price, quantity,
-    unit || 'unit', weight_kg != null ? weight_kg : 1.0
+  const { rows: inserted } = await db.query(
+    'INSERT INTO products (farmer_id, name, description, price, quantity, unit, weight_kg) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+    [req.user.id, name, description || '', price, quantity, unit || 'unit', weight_kg != null ? weight_kg : 1.0]
   );
 
-  const productId = result.lastInsertRowid;
+  const productId = inserted[0].id;
 
   if (available_from) {
-    db.prepare('INSERT INTO product_scheduling (product_id, available_from) VALUES (?, ?)').run(
-      productId, available_from
-    );
+    await db.query('INSERT INTO product_scheduling (product_id, available_from) VALUES ($1, $2)', [
+      productId,
+      available_from,
+    ]);
   }
 
   await cache.delByPattern('products:*');
@@ -260,102 +258,98 @@ router.post('/', auth, requireEmailVerified, validate.product, async (req, res) 
 });
 
 // PUT /api/products/:id/schedule - farmer sets or updates pre-order availability
-router.put('/:id/schedule', auth, (req, res) => {
+router.put('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Only farmers can schedule products' });
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
+  const product = (await db.query('SELECT id FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
 
   const { available_from } = req.body;
   if (!available_from)
     return res.status(400).json({ error: 'available_from required (ISO 8601 datetime)' });
 
-  db.prepare(`
+  await db.query(`
     INSERT INTO product_scheduling (product_id, available_from)
-    VALUES (?, ?)
+    VALUES ($1, $2)
     ON CONFLICT(product_id) DO UPDATE SET available_from = excluded.available_from
-  `).run(req.params.id, available_from);
+  `, [req.params.id, available_from]);
 
   res.json({ message: 'Schedule updated', product_id: req.params.id, available_from });
 });
 
 // DELETE /api/products/:id/schedule - farmer removes scheduling (makes immediately available)
-router.delete('/:id/schedule', auth, (req, res) => {
+router.delete('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Farmers only' });
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
+  const product = (await db.query('SELECT id FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
 
-  db.prepare('DELETE FROM product_scheduling WHERE product_id = ?').run(req.params.id);
+  await db.query('DELETE FROM product_scheduling WHERE product_id = $1', [req.params.id]);
   res.json({ message: 'Schedule removed, product is now immediately available' });
 });
 
 // GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
-router.get('/mine/list', auth, (req, res) => {
+router.get('/mine/list', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Farmers only' });
 
-  const products = db.prepare(`
+  const { rows: products } = await db.query(`
     SELECT p.*, ps.available_from
     FROM products p
     LEFT JOIN product_scheduling ps ON p.id = ps.product_id
-    WHERE p.farmer_id = ?
+    WHERE p.farmer_id = $1
     ORDER BY p.created_at DESC
-  `).all(req.user.id);
+  `, [req.user.id]);
   res.json(products);
 });
 
 // PUT /api/products/:id/schedule - farmer sets or updates pre-order availability
-router.put('/:id/schedule', auth, (req, res) => {
+router.put('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Only farmers can schedule products' });
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
+  const product = (await db.query('SELECT id FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
 
   const { available_from } = req.body;
   if (!available_from)
     return res.status(400).json({ error: 'available_from required (ISO 8601 datetime)' });
 
-  db.prepare(`
+  await db.query(`
     INSERT INTO product_scheduling (product_id, available_from)
-    VALUES (?, ?)
+    VALUES ($1, $2)
     ON CONFLICT(product_id) DO UPDATE SET available_from = excluded.available_from
-  `).run(req.params.id, available_from);
+  `, [req.params.id, available_from]);
 
   res.json({ message: 'Schedule updated', product_id: req.params.id, available_from });
 });
 
 // DELETE /api/products/:id/schedule - farmer removes scheduling (makes immediately available)
-router.delete('/:id/schedule', auth, (req, res) => {
+router.delete('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Farmers only' });
 
-  const product = db.prepare('SELECT id FROM products WHERE id = ? AND farmer_id = ?')
-    .get(req.params.id, req.user.id);
+  const product = (await db.query('SELECT id FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
 
-  db.prepare('DELETE FROM product_scheduling WHERE product_id = ?').run(req.params.id);
+  await db.query('DELETE FROM product_scheduling WHERE product_id = $1', [req.params.id]);
   res.json({ message: 'Schedule removed, product is now immediately available' });
 });
 
 // GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
-router.get('/mine/list', auth, (req, res) => {
+router.get('/mine/list', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
     return res.status(403).json({ error: 'Farmers only' });
 
-  const products = db.prepare(`
+  const { rows: products } = await db.query(`
     SELECT p.*, ps.available_from
     FROM products p
     LEFT JOIN product_scheduling ps ON p.id = ps.product_id
-    WHERE p.farmer_id = ?
+    WHERE p.farmer_id = $1
     ORDER BY p.created_at DESC
-  `).all(req.user.id);
+  `, [req.user.id]);
   res.json(products);
 });
 
@@ -656,13 +650,13 @@ router.post('/:id/images', auth, async (req, res) => {
 });
 
 // GET /api/products/:id
-router.get('/:id', (req, res) => {
-  const product = db.prepare(`
+router.get('/:id', async (req, res) => {
+  const product = (await db.query(`
     SELECT p.*, u.name as farmer_name, u.stellar_public_key as farmer_wallet,
            COALESCE(p.avg_rating, 0) as avg_rating,
            COALESCE(p.review_count, 0) as review_count
-    FROM products p JOIN users u ON p.farmer_id = u.id WHERE p.id = ?
-  `).get(req.params.id);
+    FROM products p JOIN users u ON p.farmer_id = u.id WHERE p.id = $1
+  `, [req.params.id])).rows[0];
   if (!product) return err(res, 404, 'Product not found', 'not_found');
   res.json({ success: true, data: product });
 });
@@ -930,17 +924,17 @@ router.get('/:id/batches', async (req, res) => {
 });
 
 // POST /api/products/:id/restock — farmer adds stock; triggers back-in-stock notifications (once per restock)
-router.post('/:id/restock', auth, (req, res) => {
+router.post('/:id/restock', auth, async (req, res) => {
   if (req.user.role !== 'farmer') return res.status(403).json({ error: 'Farmers only' });
 
   const quantity = parseInt(req.body.quantity, 10);
   if (isNaN(quantity) || quantity < 1) return res.status(400).json({ error: 'quantity must be a positive integer' });
 
-  const product = db.prepare('SELECT * FROM products WHERE id = ? AND farmer_id = ?').get(req.params.id, req.user.id);
+  const product = (await db.query('SELECT * FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Not found or not yours' });
 
   const wasOutOfStock = product.quantity === 0;
-  db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?').run(quantity, product.id);
+  await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, product.id]);
 
   // Only notify if the product was out of stock and hasn't fired a notification for this restock yet.
   if (!wasOutOfStock || product.restock_notified_at) {
@@ -948,12 +942,12 @@ router.post('/:id/restock', auth, (req, res) => {
   }
 
   // Stamp immediately to prevent duplicate sends on concurrent requests.
-  db.prepare('UPDATE products SET restock_notified_at = CURRENT_TIMESTAMP WHERE id = ?').run(product.id);
+  await db.query('UPDATE products SET restock_notified_at = CURRENT_TIMESTAMP WHERE id = $1', [product.id]);
 
   // Gather unique buyer IDs from both favourites and waitlists.
   const buyerIds = [
-    ...db.prepare('SELECT user_id FROM favourites WHERE product_id = ?').all(product.id),
-    ...db.prepare('SELECT user_id FROM waitlists WHERE product_id = ?').all(product.id),
+    ...(await db.query('SELECT user_id FROM favourites WHERE product_id = $1', [product.id])).rows,
+    ...(await db.query('SELECT user_id FROM waitlists WHERE product_id = $1', [product.id])).rows,
   ]
     .map(r => r.user_id)
     .filter((v, i, a) => a.indexOf(v) === i);
@@ -965,10 +959,10 @@ router.post('/:id/restock', auth, (req, res) => {
   // Fire-and-forget — don't block the HTTP response.
   Promise.allSettled(
     buyerIds.map(async (userId) => {
-      const user = db.prepare('SELECT id, name, email FROM users WHERE id = ?').get(userId);
+      const user = (await db.query('SELECT id, name, email FROM users WHERE id = $1', [userId])).rows[0];
       if (!user) return;
 
-      const sub = db.prepare('SELECT subscription_json FROM push_subscriptions WHERE user_id = ?').get(userId);
+      const sub = (await db.query('SELECT subscription_json FROM push_subscriptions WHERE user_id = $1', [userId])).rows[0];
 
       await Promise.allSettled([
         sendBackInStockEmail({ user, product: updatedProduct }),
