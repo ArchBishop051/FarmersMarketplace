@@ -507,3 +507,17 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for full guidance on:
 - Issue workflow and label guide
 
 For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md) instead of opening a public issue.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1306 -->
+- #1306: Escrow snapshots are non-durable and can be spammed
+
+<!-- handsoff-issue-1307 -->
+- #1307: Payment-stream `withdraw`/`cancel`/`top_up` take a caller-supplied token address, which can drain other assets
+
+<!-- handsoff-issue-1308 -->
+- #1308: Streams created by `release_to_stream` can never be withdrawn or cancelled
+
+<!-- handsoff-issue-1309 -->
+- #1309: Payment-stream storage entries are never TTL-extended
