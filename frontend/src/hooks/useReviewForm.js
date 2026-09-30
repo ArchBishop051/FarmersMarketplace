@@ -18,7 +18,9 @@ export function useReviewForm(productId, { onSuccess }) {
     try {
       const res = await api.getOrders({ limit: 100 });
       const orders = (res.data ?? []).filter(
-        (o) => o.product_id === parseInt(productId) && o.status === 'paid'
+        (o) =>
+          o.product_id === parseInt(productId) &&
+          ['paid', 'processing', 'shipped', 'delivered', 'completed'].includes(o.status)
       );
       if (orders.length > 0) setReviewOrderId(String(orders[0].id));
     } catch {

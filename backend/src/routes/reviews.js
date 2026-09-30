@@ -22,6 +22,9 @@ async function recalcRating(productId) {
 }
 
 // GET /api/reviews/:productId - approved reviews only (public)
+router.get('/reviews/:productId', (req, res) => {
+  const rows = db.prepare(`
+    SELECT r.id, r.rating, r.body, r.created_at, u.name as buyer_name
 router.get('/:productId', async (req, res) => {
   const { rows } = await db.query(
     `SELECT r.id, r.rating, r.body, r.created_at, u.name as buyer_name
@@ -70,6 +73,8 @@ router.get('/admin/reviews/pending', auth, async (req, res) => {
 });
 
 // DELETE /api/reviews/:id - buyer deletes own review
+router.delete('/reviews/:id', auth, (req, res) => {
+  const review = db.prepare('SELECT * FROM reviews WHERE id = ? AND buyer_id = ?').get(req.params.id, req.user.id);
 router.delete('/:id', auth, async (req, res) => {
   const review = (
     await db.query('SELECT * FROM reviews WHERE id = $1 AND buyer_id = $2', [req.params.id, req.user.id])
@@ -84,25 +89,38 @@ const validate = require('../middleware/validate');
 const { sanitizeText } = require('../utils/sanitize');
 
 // POST /api/reviews
-router.post('/', auth, validate.review, async (req, res) => {
+router.post('/reviews', auth, validate.review, async (req, res) => {
   if (req.user.role !== 'buyer')
     return err(res, 403, 'Only buyers can submit reviews', 'forbidden');
 
-  const product_id = parseInt(req.body.product_id, 10);
-  const rating = parseInt(req.body.rating, 10);
+  const orderId = Number(req.body.order_id);
+  const rating = Number(req.body.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5)
+    return err(res, 400, 'Rating must be an integer between 1 and 5', 'validation_error');
   const comment = req.body.comment ? sanitizeText(req.body.comment) : null;
 
-  // Check if buyer has a paid order for this product
+  // Reviews are available once payment has been made, including after fulfillment.
   const { rows: orderRows } = await db.query(
-    `SELECT id FROM orders WHERE buyer_id = $1 AND product_id = $2 AND status = 'paid' LIMIT 1`,
-    [req.user.id, product_id]
+    `SELECT id, product_id FROM orders
+     WHERE buyer_id = $1 AND id = $2
+       AND status IN ('paid', 'processing', 'shipped', 'delivered', 'completed')
+     LIMIT 1`,
+    [req.user.id, orderId]
   );
   if (!orderRows[0])
     return err(res, 403, 'Purchase required to review this product', 'purchase_required');
 
+  const order = orderRows[0];
+  const { rows: existingReviews } = await db.query(
+    'SELECT id FROM reviews WHERE order_id = $1 LIMIT 1',
+    [order.id]
+  );
+  if (existingReviews[0])
+    return err(res, 409, 'This order has already been reviewed', 'duplicate_review');
+
   const { rows } = await db.query(
     'INSERT INTO reviews (order_id, buyer_id, product_id, rating, comment) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-    [orderRows[0].id, req.user.id, product_id, rating, comment]
+    [order.id, req.user.id, order.product_id, rating, comment]
   );
   res.status(201).json({ success: true, id: rows[0].id, message: 'Review submitted' });
 });
@@ -112,7 +130,8 @@ router.get('/products/:id/reviews', async (req, res) => {
   const { rows } = await db.query(
     `SELECT r.id, r.rating, r.comment, r.created_at, u.name as reviewer_name
      FROM reviews r JOIN users u ON r.buyer_id = u.id
-     WHERE r.product_id = $1 ORDER BY r.created_at DESC`,
+     WHERE r.product_id = $1 AND r.status = 'approved'
+     ORDER BY r.created_at DESC`,
     [req.params.id]
   );
   res.json({ success: true, data: rows });

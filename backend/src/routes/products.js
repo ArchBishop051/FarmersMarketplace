@@ -67,7 +67,7 @@ router.get('/', async (req, res) => {
     : '';
 
   if (available === 'true') conditions.push('p.quantity > 0');
-  conditions.push(`p.best_before IS NULL OR p.best_before >= CURRENT_DATE`);
+  conditions.push(`(p.best_before IS NULL OR p.best_before >= CURRENT_DATE)`);
   const now = db.isPostgres ? 'NOW()' : "datetime('now')";
   conditions.push(`(p.available_from IS NULL OR p.available_from <= ${now})`);
   conditions.push(`(p.available_until IS NULL OR p.available_until >= ${now})`);
@@ -130,7 +130,7 @@ router.get('/', async (req, res) => {
             COUNT(r.id) as review_count${popularSelect}${tsRankSelect}
      FROM products p
      JOIN users u ON p.farmer_id = u.id
-     LEFT JOIN reviews r ON r.product_id = p.id
+     LEFT JOIN reviews r ON r.product_id = p.id AND r.status = 'approved'
      ${categoryJoin}
      ${popularJoin}
      ${where}
@@ -161,11 +161,17 @@ router.get('/allergens', (req, res) => {
 
 // GET /api/products/:id
 router.get('/:id', async (req, res) => {
+  const { rows } = await db.query(`
   const product = (await db.query(`
     SELECT p.*, u.name AS farmer_name, u.stellar_public_key AS farmer_wallet
     FROM products p
     JOIN users u ON p.farmer_id = u.id
     WHERE p.id = $1
+  `, [req.params.id]);
+  const product = rows[0];
+  if (!product) return err(res, 404, 'Product not found', 'not_found');
+
+  if (product.available_from && new Date(product.available_from) > new Date()) {
   `, [req.params.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found' });
 
@@ -173,12 +179,22 @@ router.get('/:id', async (req, res) => {
   const schedule = (await db.query('SELECT available_from FROM product_scheduling WHERE product_id = $1', [product.id])).rows[0];
   if (schedule && new Date(schedule.available_from) > new Date()) {
     return res.status(404).json({
-      error: 'Product not yet available',
-      available_from: schedule.available_from,
+      success: false,
+      error: 'not_yet_available',
+      message: 'Product not yet available',
+      code: 'not_yet_available',
+      available_from: product.available_from,
     });
   }
 
-  res.json(product);
+  res.json({
+    success: true,
+    data: {
+      ...product,
+      avg_rating: product.avg_rating ?? 0,
+      review_count: product.review_count ?? 0,
+    },
+  });
 });
 
 /**
@@ -219,7 +235,10 @@ router.get('/:id', async (req, res) => {
 router.post('/', auth, requireEmailVerified, validate.product, async (req, res) => {
   if (req.user.role !== 'farmer') return err(res, 403, 'Only farmers can list products', 'forbidden');
 
-  const { name, description, unit, category, image_url, nutrition } = req.body;
+  const {
+    name, description, unit, category, image_url, nutrition, pricing_type, min_weight,
+    max_weight, min_order_quantity, pricing_model, min_price, low_stock_threshold,
+  } = req.body;
   const price = parseFloat(req.body.price);
   const quantity = parseInt(req.body.quantity, 10);
 
@@ -233,12 +252,43 @@ router.post('/', auth, requireEmailVerified, validate.product, async (req, res) 
   const { weight_kg, available_from, available_until } = req.body;
 
   if (available_until != null) {
-    if (new Date(available_until) <= new Date()) return err(res, 400, 'available_until must be in the future', 'validation_error');
+    const until = new Date(available_until);
+    if (Number.isNaN(until.getTime()) || until <= new Date())
+      return err(res, 400, 'available_until must be in the future', 'validation_error');
+  }
+  if (available_from != null && Number.isNaN(new Date(available_from).getTime())) {
+    return err(res, 400, 'available_from must be a valid date', 'validation_error');
   }
   if (available_from != null && available_until != null) {
-    if (new Date(available_from) >= new Date(available_until)) return err(res, 400, 'available_from must be before available_until', 'validation_error');
+    if (new Date(available_from) >= new Date(available_until))
+      return err(res, 400, 'available_from must be before available_until', 'validation_error');
   }
 
+  const allergenResult = parseAndValidateAllergens(req.body.allergens);
+  if (allergenResult.error) return err(res, 400, allergenResult.error, 'invalid_allergen');
+  const allowedRegions = parseAllowedRegions(req.body.allowed_regions);
+
+  const columns = [
+    'farmer_id', 'name', 'description', 'category', 'price', 'quantity', 'unit', 'weight_kg',
+    'image_url', 'nutrition', 'available_from', 'available_until', 'is_preorder',
+    'preorder_delivery_date', 'allergens', 'allowed_regions', 'pricing_type', 'min_weight',
+    'max_weight', 'min_order_quantity', 'pricing_model', 'min_price', 'low_stock_threshold',
+  ];
+  const values = [
+    req.user.id, name, description || '', category || 'other', price, quantity, unit || 'unit',
+    weight_kg ?? 1.0, image_url || null, nutrition ? JSON.stringify(nutrition) : null,
+    available_from || null, available_until || null, preorder.isPreorder,
+    preorder.isPreorder ? preorder.preorderDeliveryDate : null, allergenResult.allergens,
+    allowedRegions, pricing_type || 'unit', min_weight ?? null, max_weight ?? null,
+    min_order_quantity ?? 1, pricing_model || 'fixed', min_price ?? null,
+    low_stock_threshold ?? 5,
+  ];
+  const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+  const { rows } = await db.query(
+    `INSERT INTO products (${columns.join(', ')}) VALUES (${placeholders}) RETURNING id`,
+    values
+  );
+  const productId = rows[0].id;
   const { rows: inserted } = await db.query(
     'INSERT INTO products (farmer_id, name, description, price, quantity, unit, weight_kg) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
     [req.user.id, name, description || '', price, quantity, unit || 'unit', weight_kg != null ? weight_kg : 1.0]
@@ -293,8 +343,26 @@ router.delete('/:id/schedule', auth, async (req, res) => {
 // GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
 router.get('/mine/list', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
+    return err(res, 403, 'Only farmers can schedule products', 'forbidden');
 
+  const { rows } = await db.query(
+    'SELECT id, available_until FROM products WHERE id = $1 AND farmer_id = $2',
+    [req.params.id, req.user.id]
+  );
+  const product = rows[0];
+  if (!product) return err(res, 404, 'Product not found or not yours', 'not_found');
+
+  const { available_from } = req.body;
+  if (!available_from)
+    return err(res, 400, 'available_from required (ISO 8601 datetime)', 'validation_error');
+  const availableFromDate = new Date(available_from);
+  if (Number.isNaN(availableFromDate.getTime()))
+    return err(res, 400, 'available_from must be a valid date', 'validation_error');
+  if (product.available_until && availableFromDate >= new Date(product.available_until))
+    return err(res, 400, 'available_from must be before available_until', 'validation_error');
+
+  await db.query('UPDATE products SET available_from = $1 WHERE id = $2', [available_from, req.params.id]);
+  await cache.delByPattern('products:*');
   const { rows: products } = await db.query(`
     SELECT p.*, ps.available_from
     FROM products p
@@ -329,8 +397,16 @@ router.put('/:id/schedule', auth, async (req, res) => {
 // DELETE /api/products/:id/schedule - farmer removes scheduling (makes immediately available)
 router.delete('/:id/schedule', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
+    return err(res, 403, 'Farmers only', 'forbidden');
 
+  const { rows } = await db.query(
+    'SELECT id FROM products WHERE id = $1 AND farmer_id = $2',
+    [req.params.id, req.user.id]
+  );
+  if (!rows[0]) return err(res, 404, 'Product not found or not yours', 'not_found');
+
+  await db.query('UPDATE products SET available_from = NULL WHERE id = $1', [req.params.id]);
+  await cache.delByPattern('products:*');
   const product = (await db.query('SELECT id FROM products WHERE id = $1 AND farmer_id = $2', [req.params.id, req.user.id])).rows[0];
   if (!product) return res.status(404).json({ error: 'Product not found or not yours' });
 
@@ -341,8 +417,13 @@ router.delete('/:id/schedule', auth, async (req, res) => {
 // GET /api/products/mine/list - farmer's own products (includes unscheduled ones)
 router.get('/mine/list', auth, async (req, res) => {
   if (req.user.role !== 'farmer')
-    return res.status(403).json({ error: 'Farmers only' });
+    return err(res, 403, 'Farmers only', 'forbidden');
 
+  const { rows } = await db.query(
+    'SELECT * FROM products WHERE farmer_id = $1 ORDER BY created_at DESC',
+    [req.user.id]
+  );
+  res.json({ success: true, data: rows });
   const { rows: products } = await db.query(`
     SELECT p.*, ps.available_from
     FROM products p
@@ -527,8 +608,7 @@ router.delete('/:id', auth, async (req, res) => {
   res.json({ success: true, message: 'Deleted' });
 });
 
-// PATCH /api/products/:id/restock
-router.patch('/:id/restock', auth, async (req, res) => {
+async function restockProduct(req, res) {
   if (req.user.role !== 'farmer') return err(res, 403, 'Only farmers can restock products', 'forbidden');
   const quantity = parseInt(req.body.quantity, 10);
   if (Number.isNaN(quantity) || quantity <= 0) return err(res, 400, 'Quantity must be a positive integer', 'validation_error');
@@ -540,6 +620,7 @@ router.patch('/:id/restock', auth, async (req, res) => {
 
     const wasOutOfStock = product.quantity === 0;
     await db.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [quantity, req.params.id]);
+    await cache.delByPattern('products:*');
 
     let waitlistResults = null;
     if (wasOutOfStock) {
@@ -573,7 +654,11 @@ router.patch('/:id/restock', auth, async (req, res) => {
     logger.error('[Restock] Error processing restock', { error: error.message, stack: error.stack });
     return err(res, 500, 'Internal server error during restock', 'internal_error');
   }
-});
+}
+
+router.patch('/:id/restock', auth, restockProduct);
+// Preserve the old POST method while sharing the canonical restock behavior.
+router.post('/:id/restock', auth, restockProduct);
 
 // POST /api/products/:id/alert
 router.post('/:id/alert', auth, async (req, res) => {

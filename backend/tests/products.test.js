@@ -7,7 +7,7 @@ beforeEach(() => {
 });
 
 const SECRET = process.env.JWT_SECRET || 'test-secret-for-jest';
-const farmerToken = jwt.sign({ id: 1, role: 'farmer' }, SECRET);
+const farmerToken = jwt.sign({ id: 1, role: 'farmer', email_verified_at: '2025-01-01' }, SECRET);
 const buyerToken = jwt.sign({ id: 2, role: 'buyer' }, SECRET);
 
 describe('GET /api/products', () => {
@@ -53,6 +53,18 @@ describe('GET /api/products', () => {
     expect(res.body.page).toBe(1);
   });
 
+  it('groups the best-before condition so it cannot bypass other filters', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ count: '0' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    await request(app).get('/api/products?category=vegetables&minPrice=1');
+
+    expect(mockQuery.mock.calls[0][0]).toContain(
+      'p.quantity > 0 AND (p.best_before IS NULL OR p.best_before >= CURRENT_DATE) AND'
+    );
+    expect(mockQuery.mock.calls[0][1]).toEqual(['vegetables', 1]);
+  });
+
   describe('filters', () => {
     it('filters by grade=A only', async () => {
       mockGet.mockReturnValueOnce({ count: 2 }); // total count
@@ -96,12 +108,62 @@ describe('POST /api/products', () => {
   });
 
   it('farmer can create product with grade', async () => {
-    mockRun.mockReturnValueOnce({ lastInsertRowid: 6 });
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 6 }], rowCount: 1 });
     const res = await request(app)
       .post('/api/products')
       .set('Authorization', `Bearer ${farmerToken}`)
       .send({ name: 'Premium Apples', price: 3.0, quantity: 50, unit: 'kg', grade: 'A' });
     expect(res.status).toBe(200);
+  });
+
+  it('persists the product form fields on creation', async () => {
+    const { token: csrf, cookieStr } = await getCsrf();
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 7 }], rowCount: 1 });
+
+    const res = await request(app)
+      .post('/api/products')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .set('Cookie', cookieStr)
+      .set('X-CSRF-Token', csrf)
+      .send({
+        name: 'Organic Apples',
+        description: 'Fresh from the farm',
+        category: 'fruit',
+        price: 3,
+        quantity: 20,
+        unit: 'kg',
+        weight_kg: 1.5,
+        image_url: '/uploads/apple.jpg',
+        nutrition: { calories: 52, protein: 0.3 },
+        available_from: '2099-01-01T00:00:00Z',
+        available_until: '2099-02-01T00:00:00Z',
+        is_preorder: 1,
+        preorder_delivery_date: '2099-02-15',
+        allergens: ['nuts'],
+        allowed_regions: ['us', 'ca'],
+        pricing_type: 'weight',
+        min_weight: 0.5,
+        max_weight: 5,
+        min_order_quantity: 2,
+        pricing_model: 'pwyw',
+        min_price: 1.5,
+        low_stock_threshold: 3,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(7);
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toContain('category');
+    expect(sql).toContain('image_url');
+    expect(sql).toContain('nutrition');
+    expect(sql).toContain('available_until');
+    expect(sql).toContain('preorder_delivery_date');
+    expect(params).toContain(JSON.stringify({ calories: 52, protein: 0.3 }));
+    expect(params).toContain(JSON.stringify(['nuts']));
+    expect(params).toContain(JSON.stringify(['US', 'CA']));
+    expect(params).toContain(true);
+    expect(params).toContain('2099-02-15');
+    expect(params).toContain(1.5);
   });
 
   it('buyer cannot create a product', async () => {
@@ -152,6 +214,35 @@ describe('GET /api/products/:id', () => {
     const res = await request(app).get('/api/products/1');
     expect(res.status).toBe(200);
     expect(res.body.data.name).toBe('Carrots');
+  });
+});
+
+describe('product availability schedule routes', () => {
+  it('updates the product availability field', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1, available_until: null }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    const res = await request(app)
+      .put('/api/products/1/schedule')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .send({ available_from: '2099-01-01T00:00:00Z' });
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][0]).toContain('UPDATE products SET available_from');
+  });
+
+  it('removes the product availability schedule', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    const res = await request(app)
+      .delete('/api/products/1/schedule')
+      .set('Authorization', `Bearer ${farmerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(mockQuery.mock.calls[1][0]).toContain('UPDATE products SET available_from = NULL');
   });
 });
 
