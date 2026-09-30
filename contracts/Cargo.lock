@@ -251,6 +251,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "contract-test-utils"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,6 +287,7 @@ dependencies = [
 name = "creator-earnings"
 version = "0.1.0"
 dependencies = [
+ "contract-test-utils",
  "soroban-sdk",
 ]
 
@@ -1299,6 +1307,8 @@ dependencies = [
 name = "soroban-escrow"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "contract-test-utils",
  "soroban-sdk",
 ]
 

@@ -310,6 +310,9 @@ impl CreatorEarningsContract {
             return Err(EarningsError::ZeroBalance);
         }
 
+        // #1240 — zeroing before the transfer is safe: Soroban invocations are
+        // atomic, so if the transfer fails (token paused/frozen, insufficient
+        // contract balance) this write is reverted with the rest of the call.
         env.storage().persistent().set(&key, &0_i128);
 
         token::Client::new(&env, &token).transfer(
@@ -456,6 +459,25 @@ mod test {
                 .persistent()
                 .set(&DataKey::Balance(creator), &amount);
         });
+    }
+
+    // ── #1240 failed token transfer does not commit balance reset ────────────
+
+    #[test]
+    fn claim_failed_transfer_keeps_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorEarningsContract, ());
+        // Real SAC; the contract holds 0 tokens, so the claim transfer fails.
+        let token = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        let creator = Address::generate(&env);
+        seed_balance(&env, &contract_id, creator.clone(), 500);
+
+        let client = CreatorEarningsContractClient::new(&env, &contract_id);
+        assert!(client.try_claim(&creator, &token).is_err());
+        assert_eq!(balance(&env, &contract_id, creator), 500);
     }
 
     // ── unit tests ───────────────────────────────────────────────────────────

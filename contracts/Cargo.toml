@@ -2,6 +2,7 @@
 members = [
     "escrow",
     "creator-earnings",
+    "test-utils",
 ]
 resolver = "2"
 
