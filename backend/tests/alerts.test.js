@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { request, app, mockGet, mockAll, mockRun, mockPrepare } = require('./setup');
+const { request, app, mockAll, mockQuery } = require('./setup');
 const mailer = jest.requireMock('../src/utils/mailer');
 
 beforeEach(() => jest.clearAllMocks());
@@ -68,36 +68,16 @@ describe('DELETE /api/alerts/waitlist/:productId', () => {
 
 // ── Restock notifications ─────────────────────────────────────────────────────
 
-describe('POST /api/products/:id/restock', () => {
+describe('POST /api/products/:id/restock compatibility alias', () => {
   const outOfStockProduct = {
-    id: 10, name: 'Tomatoes', quantity: 0, farmer_id: 1, restock_notified_at: null,
+    id: 10, name: 'Tomatoes', quantity: 0, farmer_id: 1,
   };
 
-  function setupRestockMocks({ product = outOfStockProduct, favBuyers = [], waitBuyers = [], userRows = [], subRow = null } = {}) {
-    // Call order inside the route handler:
-    //   1. get product (ownership check)
-    //   2. run UPDATE quantity
-    //   3. run UPDATE restock_notified_at
-    //   4. all favourites
-    //   5. all waitlists
-    //   6+ get user per buyer, get push sub per buyer
-    mockGet
-      .mockReturnValueOnce(product);               // 1. product lookup
-
-    mockRun
-      .mockReturnValueOnce({ changes: 1 })         // 2. UPDATE quantity
-      .mockReturnValueOnce({ changes: 1 });         // 3. UPDATE restock_notified_at
-
-    mockAll
-      .mockReturnValueOnce(favBuyers)              // 4. favourites
-      .mockReturnValueOnce(waitBuyers);            // 5. waitlists
-
-    // For each unique user: mockGet (user row) + mockGet (push sub)
-    for (const user of userRows) {
-      mockGet
-        .mockReturnValueOnce(user)    // user row
-        .mockReturnValueOnce(subRow); // push subscription
-    }
+  function setupRestockMocks(product = outOfStockProduct) {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [product], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    if (product.quantity === 0) mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
   }
 
   it('returns 403 for buyers', async () => {
@@ -117,7 +97,7 @@ describe('POST /api/products/:id/restock', () => {
   });
 
   it('returns 404 for unknown product', async () => {
-    mockGet.mockReturnValueOnce(undefined);
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .post('/api/products/10/restock')
       .set('Authorization', `Bearer ${farmerToken}`)
@@ -125,14 +105,8 @@ describe('POST /api/products/:id/restock', () => {
     expect(res.status).toBe(404);
   });
 
-  it('sends email AND push to favourites + waitlist buyers on first restock', async () => {
-    const buyer = { id: 2, name: 'Bob', email: 'bob@test.com' };
-    setupRestockMocks({
-      favBuyers:  [{ user_id: 2 }],
-      waitBuyers: [],
-      userRows:   [buyer],
-      subRow:     { subscription_json: JSON.stringify({ endpoint: 'https://push.test', keys: {} }) },
-    });
+  it('uses the same restock workflow as PATCH', async () => {
+    setupRestockMocks();
 
     const res = await request(app)
       .post('/api/products/10/restock')
@@ -140,30 +114,19 @@ describe('POST /api/products/:id/restock', () => {
       .send({ quantity: 5 });
 
     expect(res.status).toBe(200);
-    expect(res.body.notified).toBe(1);
-
-    // Give the fire-and-forget Promise.allSettled a tick to resolve.
-    await new Promise(r => setImmediate(r));
-
-    expect(mailer.sendBackInStockEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ user: buyer, product: expect.objectContaining({ id: 10 }) })
-    );
-    expect(mailer.sendPushToUser).toHaveBeenCalledWith(
-      expect.objectContaining({
-        payload: expect.objectContaining({ title: 'Back in stock' }),
-      })
+    expect(res.body.success).toBe(true);
+    expect(res.body.waitlist.processed).toBe(0);
+    expect(mockQuery.mock.calls.map(([sql]) => sql)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('SELECT * FROM products'),
+        expect.stringContaining('UPDATE products SET quantity'),
+        expect.stringContaining('SELECT u.email, u.name FROM stock_alerts'),
+      ])
     );
   });
 
-  it('deduplicates buyer IDs across favourites and waitlists', async () => {
-    const buyer = { id: 2, name: 'Bob', email: 'bob@test.com' };
-    // Buyer 2 appears in both favourites and waitlists — should only be notified once.
-    setupRestockMocks({
-      favBuyers:  [{ user_id: 2 }],
-      waitBuyers: [{ user_id: 2 }],
-      userRows:   [buyer], // only one user lookup expected
-      subRow:     null,
-    });
+  it('returns the shared waitlist response for an out-of-stock product', async () => {
+    setupRestockMocks();
 
     const res = await request(app)
       .post('/api/products/10/restock')
@@ -171,34 +134,28 @@ describe('POST /api/products/:id/restock', () => {
       .send({ quantity: 5 });
 
     expect(res.status).toBe(200);
-    expect(res.body.notified).toBe(1); // deduplicated: 1, not 2
-
-    await new Promise(r => setImmediate(r));
-    expect(mailer.sendBackInStockEmail).toHaveBeenCalledTimes(1);
-  });
-
-  it('does NOT notify on double-restock (restock_notified_at already set)', async () => {
-    const alreadyNotified = { ...outOfStockProduct, restock_notified_at: '2026-06-01T00:00:00Z' };
-    mockGet.mockReturnValueOnce(alreadyNotified);
-    mockRun.mockReturnValueOnce({ changes: 1 }); // UPDATE quantity
-
-    const res = await request(app)
-      .post('/api/products/10/restock')
-      .set('Authorization', `Bearer ${farmerToken}`)
-      .send({ quantity: 5 });
-
-    expect(res.status).toBe(200);
-    expect(res.body.notified).toBeUndefined(); // no notification path taken
-
-    await new Promise(r => setImmediate(r));
+    expect(res.body.waitlist.processed).toBe(0);
     expect(mailer.sendBackInStockEmail).not.toHaveBeenCalled();
-    expect(mailer.sendPushToUser).not.toHaveBeenCalled();
+  });
+
+  it('does not send a stock alert email when there are no subscribers', async () => {
+    setupRestockMocks();
+
+    const res = await request(app)
+      .post('/api/products/10/restock')
+      .set('Authorization', `Bearer ${farmerToken}`)
+      .send({ quantity: 5 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.waitlist.processed).toBe(0);
+
+    expect(mailer.sendBackInStockEmail).not.toHaveBeenCalled();
   });
 
   it('does NOT notify when product was already in stock', async () => {
     const inStock = { ...outOfStockProduct, quantity: 5, restock_notified_at: null };
-    mockGet.mockReturnValueOnce(inStock);
-    mockRun.mockReturnValueOnce({ changes: 1 });
+    setupRestockMocks(inStock);
 
     const res = await request(app)
       .post('/api/products/10/restock')

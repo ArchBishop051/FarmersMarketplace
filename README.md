@@ -111,21 +111,22 @@ Migrations run automatically on app startup — no manual step needed for develo
 
 ### How it works
 
-- Migration files: `backend/migrations/NNN_description.sql`
+- Migration files: `backend/migrations/NNN_description.sql`; the complete filename is the migration identity.
 - Rollback files:  `backend/migrations/NNN_description.undo.sql` (optional)
 - Applied migrations are tracked in a `migrations` table in the database
 - Running `migrate` twice is safe — already-applied migrations are skipped
+- Historical migrations reuse numeric prefixes. The runner orders complete filenames lexically, so do not rename or renumber existing migrations; use a new, unique prefix greater than the current highest (`033`) for each new migration.
 
 ### Creating a new migration
 
 ```bash
 # Up migration
 echo "ALTER TABLE products ADD COLUMN featured INTEGER DEFAULT 0;" \
-  > backend/migrations/002_add_featured.sql
+  > backend/migrations/034_add_featured.sql
 
 # Rollback (optional)
 echo "ALTER TABLE products DROP COLUMN IF EXISTS featured;" \
-  > backend/migrations/002_add_featured.undo.sql
+  > backend/migrations/034_add_featured.undo.sql
 
 npm run migrate
 ```
@@ -506,3 +507,30 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for full guidance on:
 - Issue workflow and label guide
 
 For security vulnerabilities, follow the process in [SECURITY.md](./SECURITY.md) instead of opening a public issue.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1302 -->
+- #1302: `set_auto_release_days` has no bounds, so an admin can set `0` and allow instant permissionless release
+
+<!-- handsoff-issue-1303 -->
+- #1303: `set_admin` is a single-step admin replacement that bypasses the two-step transfer
+
+<!-- handsoff-issue-1304 -->
+- #1304: Separate the "platform operator" role from the "fee destination" address (`init` vs `initialize`)
+<!-- handsoff-issue-1312 -->
+- #1312: Legacy `contract/` escrow never moves tokens: deposit/release/refund are bookkeeping only
+
+<!-- handsoff-issue-1313 -->
+- #1313: Legacy `grant_role` lets anyone claim `Platform` before `initialize`, and `revoke_role` can lock out all admins
+<!-- handsoff-issue-1306 -->
+- #1306: Escrow snapshots are non-durable and can be spammed
+
+<!-- handsoff-issue-1307 -->
+- #1307: Payment-stream `withdraw`/`cancel`/`top_up` take a caller-supplied token address, which can drain other assets
+
+<!-- handsoff-issue-1308 -->
+- #1308: Streams created by `release_to_stream` can never be withdrawn or cancelled
+
+<!-- handsoff-issue-1309 -->
+- #1309: Payment-stream storage entries are never TTL-extended
